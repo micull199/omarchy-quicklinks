@@ -1,0 +1,31 @@
+#!/bin/bash
+
+# omarchy:summary=Open a quicklink URL in the default browser
+# omarchy:args=<url>
+
+# Referenced from the Exec= line of every quicklink .desktop entry, so its name
+# doubles as the marker that identifies a quicklink. Keep it standalone.
+
+set -euo pipefail
+
+url="${1:-}"
+
+if [[ -z $url ]]; then
+  echo "Usage: omarchy-launch-quicklink <url>" >&2
+  exit 1
+fi
+
+# Match omarchy-webapp-install's scheme handling so a bare host still resolves.
+if [[ ! $url =~ ^[a-zA-Z][a-zA-Z0-9+.-]*: ]]; then
+  url="https://$url"
+fi
+
+# omarchy-launch-browser resolves the xdg default browser, scopes it under a
+# systemd unit, and focuses the window afterwards. Prefer it over bare xdg-open.
+if command -v omarchy-launch-browser >/dev/null 2>&1; then
+  exec omarchy-launch-browser "$url"
+elif command -v uwsm-app >/dev/null 2>&1; then
+  exec setsid uwsm-app -- xdg-open "$url"
+else
+  exec setsid xdg-open "$url"
+fi

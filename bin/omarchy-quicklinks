@@ -1,0 +1,352 @@
+#!/bin/bash
+
+# omarchy:summary=Manage quicklinks: named URLs that open in your default browser
+# omarchy:args=<open|new|edit|remove|list> [args...]
+
+# A quicklink is a .desktop entry in ~/.local/share/applications whose Exec line
+# invokes omarchy-launch-quicklink. Storing them as desktop entries means they
+# are searchable in the app launcher (SUPER + SPACE) for free, carry a real
+# icon, and need no separate data file. The Exec marker is what distinguishes
+# them from Omarchy web apps, which use omarchy-launch-webapp and therefore stay
+# out of each other's install and remove flows.
+
+set -euo pipefail
+
+DESKTOP_DIR="$HOME/.local/share/applications"
+ICON_DIR="$HOME/.local/share/icons/hicolor/256x256/apps"
+LEGACY_ICON_DIR="$HOME/.local/share/applications/icons"
+LAUNCHER="omarchy-launch-quicklink"
+EXEC_MARKER="^Exec=$LAUNCHER"
+FALLBACK_ICON="web-browser"
+
+G_LINK=""
+G_REMOVE=""
+
+# ---------------------------------------------------------------- utilities
+
+notify() {
+  local glyph="$1" headline="$2" desc="${3:-}"
+  if command -v omarchy-notification-send >/dev/null 2>&1; then
+    if [[ -n $desc ]]; then
+      omarchy-notification-send -g "$glyph" "$headline" "$desc" || true
+    else
+      omarchy-notification-send -g "$glyph" "$headline" || true
+    fi
+  else
+    printf '%s%s\n' "$headline" "${desc:+: $desc}"
+  fi
+}
+
+die() {
+  echo "$*" >&2
+  exit 1
+}
+
+# Use gum when we own a terminal, otherwise fall back to the Quickshell menu so
+# every command also works when launched straight from omarchy-menu.
+has_tty() { [[ -t 0 && -t 1 ]] && command -v gum >/dev/null 2>&1; }
+
+prompt_text() {
+  local label="$1" placeholder="${2:-}" value="${3:-}"
+  if has_tty; then
+    if [[ -n $value ]]; then
+      gum input --prompt "$label> " --value "$value"
+    else
+      gum input --prompt "$label> " --placeholder "$placeholder"
+    fi
+  else
+    omarchy-menu-input "$label"
+  fi
+}
+
+confirm() {
+  local question="$1" answer
+  if has_tty; then
+    gum confirm "$question"
+  else
+    answer=$(omarchy-menu-select "$question" "Yes" "No") || return 1
+    [[ $answer == "Yes" ]]
+  fi
+}
+
+# ------------------------------------------------------- quicklink storage
+
+ql_names() {
+  [[ -d $DESKTOP_DIR ]] || return 0
+  local file
+  while IFS= read -r -d '' file; do
+    if grep -qE "$EXEC_MARKER" "$file" 2>/dev/null; then
+      basename "${file%.desktop}"
+    fi
+  done < <(find "$DESKTOP_DIR" -maxdepth 1 -type f -name '*.desktop' -print0 2>/dev/null) | sort -f
+}
+
+ql_file() { printf '%s\n' "$DESKTOP_DIR/$1.desktop"; }
+
+ql_is_quicklink() {
+  local file="$1"
+  [[ -f $file ]] && grep -qE "$EXEC_MARKER" "$file" 2>/dev/null
+}
+
+# The desktop entry spec treats % as a field code and requires reserved
+# characters to be quoted, so the URL is escaped on the way in and unescaped on
+# the way back out.
+ql_escape_exec() {
+  local url="$1"
+  url=${url//\\/\\\\}
+  url=${url//\"/\\\"}
+  url=${url//%/%%}
+  printf '"%s"' "$url"
+}
+
+ql_unescape_exec() {
+  local url="$1"
+  if [[ $url == \"*\" ]]; then
+    url=${url:1:${#url}-2}
+  fi
+  url=${url//%%/%}
+  url=${url//\\\"/\"}
+  url=${url//\\\\/\\}
+  printf '%s\n' "$url"
+}
+
+ql_url() {
+  local name="$1" file raw
+  file=$(ql_file "$name")
+  [[ -f $file ]] || return 1
+  raw=$(sed -n "s|^Exec=$LAUNCHER[[:space:]]*||p" "$file" | head -1)
+  [[ -n $raw ]] || return 1
+  ql_unescape_exec "$raw"
+}
+
+ql_icon_value() {
+  local file
+  file=$(ql_file "$1")
+  [[ -f $file ]] || return 1
+  sed -n 's/^Icon=//p' "$file" | head -1
+}
+
+# Mirrors safe_icon_name() in omarchy-webapp-install.
+ql_safe_icon_name() {
+  printf '%s\n' "$1" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed 's/[^[:alnum:]]\+/-/g; s/^-//; s/-$//'
+}
+
+ql_normalize_url() {
+  local url="$1"
+  [[ -n $url ]] || return 1
+  if [[ ! $url =~ ^[a-zA-Z][a-zA-Z0-9+.-]*: ]]; then
+    url="https://$url"
+  fi
+  printf '%s\n' "$url"
+}
+
+ql_validate_name() {
+  local name="$1"
+  [[ -n $name ]] || die "You must give the quicklink a name."
+  [[ $name != */* ]] || die "A quicklink name cannot contain \"/\"."
+  [[ $name != .* ]] || die "A quicklink name cannot start with a dot."
+}
+
+# Write the entry through omarchy-webapp-install so icon fetching, the .desktop
+# format, and the launcher hint all stay identical to Web Apps. Argument 4 is
+# the documented custom-exec override; an empty argument 3 triggers the full
+# icon auto-fetch chain. If that fetch fails the upstream script exits non-zero,
+# so retry once with a themed generic icon rather than losing the quicklink.
+ql_write_entry() {
+  local name="$1" url="$2" icon="$3" exec_cmd
+  exec_cmd="$LAUNCHER $(ql_escape_exec "$url")"
+
+  if omarchy-webapp-install "$name" "$url" "$icon" "$exec_cmd" >/dev/null; then
+    return 0
+  fi
+
+  if [[ -z $icon ]]; then
+    echo "Could not fetch an icon for $name; using a generic one." >&2
+    omarchy-webapp-install "$name" "$url" "$FALLBACK_ICON" "$exec_cmd" >/dev/null
+    return 0
+  fi
+
+  return 1
+}
+
+ql_pick() {
+  local prompt="$1" names=() rows=() name sel
+  mapfile -t names < <(ql_names)
+
+  if ((${#names[@]} == 0)); then
+    notify "$G_LINK" "No quicklinks yet" "Add one from Install > Quicklink"
+    return 1
+  fi
+
+  for name in "${names[@]}"; do
+    rows+=("$G_LINK"$'\t'"$name")
+  done
+
+  sel=$(omarchy-menu-select "$prompt" "${rows[@]}" -- --width 520 --maxheight 520) || return 1
+  [[ -n $sel ]] || return 1
+  printf '%s\n' "$sel"
+}
+
+# ---------------------------------------------------------------- commands
+
+cmd_new() {
+  local name url icon="" interactive=false
+
+  if (($# >= 2)); then
+    name="$1"
+    url="$2"
+    icon="${3:-}"
+  else
+    interactive=true
+    if has_tty; then
+      echo -e "\e[32mLet's create a quicklink you can open from the app launcher.\n\e[0m"
+    fi
+    name=$(prompt_text "Name" "My quicklink") || exit 0
+    url=$(prompt_text "URL" "https://example.com") || exit 0
+  fi
+
+  ql_validate_name "$name"
+  url=$(ql_normalize_url "$url") || die "You must give the quicklink a URL."
+
+  local target
+  target=$(ql_file "$name")
+  if [[ -e $target ]]; then
+    if ql_is_quicklink "$target"; then
+      if $interactive; then
+        confirm "Replace the existing quicklink \"$name\"?" || exit 0
+      fi
+    else
+      die "A desktop entry named \"$name\" already exists and is not a quicklink. Choose another name."
+    fi
+  fi
+
+  ql_write_entry "$name" "$url" "$icon"
+
+  if $interactive && has_tty; then
+    echo -e "You can now find $name using the app launcher (SUPER + SPACE)\n"
+  else
+    notify "$G_LINK" "Quicklink created" "$name"
+  fi
+}
+
+cmd_open() {
+  local name url
+
+  if (($# >= 1)); then
+    name="$1"
+  else
+    name=$(ql_pick "Open quicklink") || exit 0
+  fi
+
+  url=$(ql_url "$name") || die "No such quicklink: $name"
+  exec "$LAUNCHER" "$url"
+}
+
+cmd_remove() {
+  local name icon_name
+
+  if (($# >= 1)); then
+    name="$*"
+  else
+    name=$(ql_pick "Remove quicklink") || exit 0
+  fi
+
+  ql_is_quicklink "$(ql_file "$name")" || die "No such quicklink: $name"
+
+  icon_name=$(ql_safe_icon_name "$name")
+  rm -f "$(ql_file "$name")"
+  rm -f "$ICON_DIR/$icon_name.png" "$ICON_DIR/$name.png" "$LEGACY_ICON_DIR/$name.png"
+
+  notify "$G_REMOVE" "Quicklink removed" "$name"
+  update-desktop-database "$DESKTOP_DIR" &>/dev/null || true
+}
+
+cmd_edit() {
+  local name action url icon new_name new_url
+
+  name=$(ql_pick "Edit quicklink") || exit 0
+  ql_is_quicklink "$(ql_file "$name")" || die "No such quicklink: $name"
+
+  url=$(ql_url "$name") || die "Could not read the URL for $name"
+  icon=$(ql_icon_value "$name" || true)
+
+  action=$(omarchy-menu-select "Edit \"$name\"" "Rename" "Change URL" "Remove") || exit 0
+
+  case "$action" in
+  "Rename")
+    new_name=$(prompt_text "New name" "$name" "$name") || exit 0
+    ql_validate_name "$new_name"
+    [[ $new_name != "$name" ]] || exit 0
+    [[ ! -e $(ql_file "$new_name") ]] || die "A desktop entry named \"$new_name\" already exists."
+
+    # Recreate under the new name reusing the existing icon, then drop the old
+    # entry. The icon file keeps its original name and stays referenced, so it
+    # is deliberately not deleted here.
+    ql_write_entry "$new_name" "$url" "$icon"
+    rm -f "$(ql_file "$name")"
+    update-desktop-database "$DESKTOP_DIR" &>/dev/null || true
+    notify "$G_LINK" "Quicklink renamed" "$name -> $new_name"
+    ;;
+  "Change URL")
+    new_url=$(prompt_text "URL" "$url" "$url") || exit 0
+    new_url=$(ql_normalize_url "$new_url") || die "You must give the quicklink a URL."
+    ql_write_entry "$name" "$new_url" "$icon"
+    notify "$G_LINK" "Quicklink updated" "$name"
+    ;;
+  "Remove")
+    cmd_remove "$name"
+    ;;
+  esac
+}
+
+cmd_list() {
+  local names=() name url
+  mapfile -t names < <(ql_names)
+
+  if ((${#names[@]} == 0)); then
+    echo "No quicklinks yet."
+    return 0
+  fi
+
+  for name in "${names[@]}"; do
+    url=$(ql_url "$name" || echo "?")
+    printf '%s\t%s\n' "$name" "$url"
+  done
+}
+
+usage() {
+  cat <<'USAGE'
+Usage: omarchy-quicklinks <command> [args]
+
+Commands:
+  open [name]              Open a quicklink in the default browser
+  new [name url [icon]]    Create a quicklink
+  edit                     Rename a quicklink, change its URL, or remove it
+  remove [name]            Delete a quicklink
+  list                     Print every quicklink and its URL
+
+With no arguments, open, edit and remove show a picker.
+USAGE
+}
+
+main() {
+  local cmd="${1:-open}"
+  (($# > 0)) && shift || true
+
+  case "$cmd" in
+  open) cmd_open "$@" ;;
+  new | add | install) cmd_new "$@" ;;
+  edit) cmd_edit "$@" ;;
+  remove | rm | delete) cmd_remove "$@" ;;
+  list | ls) cmd_list "$@" ;;
+  help | -h | --help) usage ;;
+  *)
+    usage >&2
+    exit 1
+    ;;
+  esac
+}
+
+main "$@"

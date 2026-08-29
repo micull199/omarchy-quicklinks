@@ -1,0 +1,6 @@
+  // Managed by the Quicklinks plugin's install.sh. Edits inside this block are
+  // overwritten on reinstall; change menu/menu-entries.jsonc in the repo instead.
+  "quicklinks": {"icon":"","label":"Quicklinks","aliases":["quicklink","links","bookmarks"],"description":"Open a saved link in the default browser","when":"grep -qsE '^Exec=omarchy-launch-quicklink' $HOME/.local/share/applications/*.desktop","action":"omarchy-quicklinks open"},
+  "install.quicklink": {"icon":"","label":"Quicklink","description":"A named URL that opens in your default browser","action":"omarchy-launch-floating-terminal-with-presentation omarchy-quicklinks new"},
+  "setup.quicklink": {"icon":"","label":"Quicklinks","when":"grep -qsE '^Exec=omarchy-launch-quicklink' $HOME/.local/share/applications/*.desktop","action":"omarchy-quicklinks edit"},
+  "remove.quicklink": {"icon":"","label":"Quicklink","when":"grep -qsE '^Exec=omarchy-launch-quicklink' $HOME/.local/share/applications/*.desktop","action":"omarchy-quicklinks remove"},
