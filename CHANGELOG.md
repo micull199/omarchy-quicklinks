@@ -15,15 +15,18 @@ All notable changes to this project are documented here. The format is based on
   `{name, url, private?, icon?}`) back in, skipping existing names unless
   `--replace`, validating every row as `add` does, and printing
   `imported N skipped M`.
-- `uninstall [--purge]`: removes every trace the plugin leaves outside its
-  folder, since Omarchy runs no hooks on `omarchy plugin remove`. Without
-  `--purge` it takes back the menu rows, the extension file if the plugin
-  created it (and the directory if that emptied it) and the plugin's `.bak`
-  files; `--purge` also deletes every quicklink entry and fetched icon, then
-  any parent directories that are left empty. It touches only files carrying
-  the plugin's marker or named after one, and is idempotent.
+- `uninstall [--keep-quicklinks] [--remove-plugin]`: removes every trace the
+  plugin leaves outside its folder, since Omarchy runs no hooks on
+  `omarchy plugin remove`. By default it deletes every quicklink entry and
+  fetched icon, the menu rows, the extension file if the plugin created it
+  (and the directory if that emptied it), the plugin's `.bak` files, and any
+  parent directories left empty — export first if you want the list back.
+  `--keep-quicklinks` leaves entries and icons in place; `--remove-plugin`
+  finishes with `omarchy plugin remove micull199.quicklinks --yes`, as the
+  Layouts plugin does. It touches only files carrying the plugin's marker or
+  named after one, and is idempotent.
 - Tests for export, import and uninstall, including a check that nothing of the
-  plugin's remains in the scratch tree after `uninstall --purge`.
+  plugin's remains in the scratch tree after `uninstall`.
 
 ### Changed
 

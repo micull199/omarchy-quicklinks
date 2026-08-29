@@ -800,28 +800,30 @@ cmd_import() {
 # plugin, deletes the folder and rescans. Everything this plugin ever writes
 # outside its own folder is listed here so one command can take it all back:
 #
+#   - every quicklink entry in ~/.local/share/applications and the icons it
+#     fetched into ~/.local/share/icons/hicolor/256x256/apps
 #   - its rows in ~/.config/omarchy/extensions/omarchy-menu.jsonc, the "{\n}"
 #     file it created when none existed, and the .bak it wrote next to it
-#   - with --purge: every quicklink entry in ~/.local/share/applications and
-#     the icons it fetched into ~/.local/share/icons/hicolor/256x256/apps
 #
-# Quicklinks are the user's data, so without --purge they stay and keep
-# working (their Exec line calls omarchy-launch-browser, not this plugin).
-# Nothing that this plugin did not create is touched: only entries carrying
-# our marker, only icons named after those entries, and directories are
-# removed only when they are empty.
+# `--keep-quicklinks` leaves the entries and icons in place; they keep working
+# because their Exec line calls omarchy-launch-browser, not this plugin.
+# `--remove-plugin` finishes by handing off to `omarchy plugin remove`, which
+# removes the plugin folder and its shell.json entry. Nothing that this plugin
+# did not create is touched: only entries carrying our marker, only icons
+# named after those entries, and directories are removed only when empty.
 cmd_uninstall() {
-  local purge=0 file name safe removed=0
+  local keep=0 remove_plugin=0 file name safe removed=0
   while (($#)); do
     case $1 in
-    --purge) purge=1 ;;
+    --keep-quicklinks) keep=1 ;;
+    --remove-plugin) remove_plugin=1 ;;
     --yes | -y) ;;
     *) die "unknown option: $1" ;;
     esac
     shift
   done
 
-  if ((purge)) && [[ -d $DESKTOP_DIR ]]; then
+  if ((!keep)) && [[ -d $DESKTOP_DIR ]]; then
     while IFS= read -r -d '' file; do
       is_quicklink "$file" || continue
       name=$(basename "${file%.desktop}")
@@ -847,10 +849,15 @@ cmd_uninstall() {
     command -v omarchy >/dev/null 2>&1 && omarchy menu refresh >/dev/null 2>&1 || true
   fi
 
-  if ((purge)); then
-    echo "removed $removed quicklink(s), menu rows and backups"
+  if ((keep)); then
+    echo "removed menu rows and backups; quicklinks kept"
   else
-    echo "removed menu rows and backups; quicklinks kept (use --purge to delete them too)"
+    echo "removed $removed quicklink(s), menu rows and backups"
+  fi
+
+  if ((remove_plugin)); then
+    command -v omarchy >/dev/null 2>&1 || die "omarchy is not on PATH; remove the plugin folder by hand"
+    exec omarchy plugin remove micull199.quicklinks --yes
   fi
 }
 

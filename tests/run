@@ -427,16 +427,16 @@ L menu-install >/dev/null
 touch "$OMARCHY_MENU_EXTENSION.bak.1700000001"
 cp "$OMARCHY_MENU_EXTENSION" "$OMARCHY_MENU_EXTENSION.bak"
 assert_contains "rows present before uninstall" "omarchy-quicklinks" "$(cat "$OMARCHY_MENU_EXTENSION")"
-assert_ok "uninstall ok" L uninstall
+assert_eq "uninstall --keep-quicklinks ok" "removed menu rows and backups; quicklinks kept" "$(L uninstall --keep-quicklinks)"
 assert_ok "uninstall restores menu file" cmp -s "$T/menu.orig" "$OMARCHY_MENU_EXTENSION"
 assert_eq "uninstall removes our .bak and legacy backups" "" "$(ls "$(dirname "$OMARCHY_MENU_EXTENSION")" | grep '\.bak')"
-assert_ok "uninstall keeps quicklinks" L any
-assert_file "uninstall keeps entries" "$(entry Plain)"
-assert_ok "uninstall is idempotent" L uninstall
+assert_ok "--keep-quicklinks keeps quicklinks" L any
+assert_file "--keep-quicklinks keeps entries" "$(entry Plain)"
+assert_ok "uninstall is idempotent" L uninstall --keep-quicklinks
 # A .bak that is not ours (no quicklinks rows in it) is left alone.
 L menu-install >/dev/null
 printf '{\n  "theirs": {"label":"x"}\n}\n' >"$OMARCHY_MENU_EXTENSION.bak"
-L uninstall >/dev/null
+L uninstall --keep-quicklinks >/dev/null
 assert_file "uninstall leaves a foreign .bak" "$OMARCHY_MENU_EXTENSION.bak"
 rm -f "$OMARCHY_MENU_EXTENSION.bak"
 # menu-install created the extension file itself: uninstall takes it away again,
@@ -444,19 +444,19 @@ rm -f "$OMARCHY_MENU_EXTENSION.bak"
 rm -rf "$(dirname "$OMARCHY_MENU_EXTENSION")"
 L menu-install >/dev/null
 assert_file "menu-install created the extension file" "$OMARCHY_MENU_EXTENSION"
-L uninstall >/dev/null
+L uninstall --keep-quicklinks >/dev/null
 assert_no_file "uninstall removes the file it created" "$OMARCHY_MENU_EXTENSION"
 assert_no_file "uninstall removes the directory it created" "$(dirname "$OMARCHY_MENU_EXTENSION")"
 # menu-uninstall behaves the same for a file it created.
 L menu-install >/dev/null
 L menu-uninstall >/dev/null
 assert_no_file "menu-uninstall removes the file it created" "$OMARCHY_MENU_EXTENSION"
-# --purge: entries and icons go, other apps and their files stay, empty dirs go.
+# Default: entries and icons go, other apps and their files stay, empty dirs go.
 mkdir -p "$OMARCHY_QUICKLINKS_ICON_DIR"
 printf 'PNG' >"$(icon plain)"; sed -i 's/^Icon=.*/Icon=plain/' "$(entry Plain)"
 printf 'PNG' >"$(icon other)"
 n=$(L list | wc -l)
-assert_eq "uninstall --purge ok" "removed $n quicklink(s), menu rows and backups" "$(L uninstall --purge)"
+assert_eq "uninstall default ok" "removed $n quicklink(s), menu rows and backups" "$(L uninstall)"
 assert_fails "purge leaves no quicklinks" L any
 assert_no_file "purge deletes entry" "$(entry Plain)"
 assert_no_file "purge deletes fetched icon" "$(icon plain)"
@@ -464,11 +464,18 @@ assert_file "purge keeps a non-quicklink entry" "$(entry Other)"
 assert_file "purge keeps an icon it did not fetch" "$(icon other)"
 [[ -d $OMARCHY_QUICKLINKS_DESKTOP_DIR ]] && ok || ko "purge keeps non-empty dirs"
 rm -f "$(entry Other)" "$(entry Legacy)" "$(icon other)"
-L uninstall --purge >/dev/null
+L uninstall >/dev/null
 assert_no_file "purge removes the emptied icon dir" "$OMARCHY_QUICKLINKS_ICON_DIR"
 assert_no_file "purge removes the emptied desktop dir" "$OMARCHY_QUICKLINKS_DESKTOP_DIR"
 assert_eq "nothing of ours left in scratch" "" "$(grep -rl 'omarchy-quicklinks\|X-Omarchy-Quicklink' "$T" --exclude-dir=bin --exclude-dir=Downloads --exclude-dir=Downloads-like --exclude=mine.json --exclude=bare.json --exclude='menu.*' 2>/dev/null)"
 assert_fails "uninstall unknown option" L uninstall --bogus
+assert_fails "uninstall --purge is gone" L uninstall --purge
+# --remove-plugin hands off to omarchy plugin remove with --yes.
+stub omarchy 'echo "$@" >>"'"$T"'/omarchy.log"'
+: >"$T/omarchy.log"
+assert_ok "uninstall --remove-plugin exits 0" L uninstall --remove-plugin
+assert_contains "--remove-plugin calls omarchy plugin remove --yes" "plugin remove micull199.quicklinks --yes" "$(cat "$T/omarchy.log")"
+stub omarchy 'exit 0'
 
 # ================================================================ usage
 echo "# usage"

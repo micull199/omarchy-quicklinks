@@ -19,8 +19,8 @@ Omarchy asks which bar section to put the icon in. The menu rows install
 themselves the first time the plugin loads. If they don't appear, run
 `omarchy restart shell`.
 
-Remove it with `bin/quicklinks uninstall` followed by
-`omarchy plugin remove micull199.quicklinks`; see [Uninstall](#uninstall).
+Remove it with `bin/quicklinks uninstall --remove-plugin`; see
+[Uninstall](#uninstall).
 
 ## Three ways to reach a quicklink
 
@@ -232,7 +232,7 @@ bin/quicklinks export [FILE|DIR|-] [--force]          # write every quicklink to
 bin/quicklinks import FILE [--replace]                # read one back
 bin/quicklinks menu-install
 bin/quicklinks menu-uninstall
-bin/quicklinks uninstall [--purge]                    # remove every trace outside the plugin folder
+bin/quicklinks uninstall [--keep-quicklinks] [--remove-plugin]  # remove every trace outside the plugin folder
 ```
 
 `edit` takes any combination of `--name`, `--url`, `--private` and
@@ -260,23 +260,30 @@ shell.
 
 Omarchy runs no hooks when a plugin is removed: `omarchy plugin remove` disables
 the plugin in `shell.json`, deletes the plugin folder and rescans. So the plugin
-carries its own cleanup command. Run it first, then remove the plugin:
+carries its own cleanup command, which by default deletes your quicklinks too.
+**Export first** if you may want them back:
 
 ```bash
-~/.config/omarchy/plugins/micull199.quicklinks/bin/quicklinks uninstall
-omarchy plugin remove micull199.quicklinks
+Q=~/.config/omarchy/plugins/micull199.quicklinks/bin/quicklinks
+$Q export                        # ~/Downloads/omarchy-quicklinks-<date>.json
+$Q uninstall --remove-plugin     # remove every trace, then the plugin itself
 ```
+
+`--remove-plugin` finishes with `omarchy plugin remove micull199.quicklinks
+--yes`; leave it off to run that step yourself. Pass `--keep-quicklinks` to
+leave the desktop entries and icons in place — they keep working because their
+`Exec` line calls `omarchy-launch-browser`, not the plugin.
 
 Everything the plugin ever writes outside its own folder, and what `uninstall`
 does with it:
 
-| Written | Where | `uninstall` | `uninstall --purge` |
+| Written | Where | `uninstall` | `--keep-quicklinks` |
 | --- | --- | --- | --- |
+| One desktop entry per quicklink | `~/.local/share/applications/<Name>.desktop` | removed (only entries carrying `X-Omarchy-Quicklink=true`) | kept |
+| Fetched site icons | `~/.local/share/icons/hicolor/256x256/apps/<name>.png` | removed (only icons named after a quicklink), then empty parent directories | kept |
 | Menu rows (marker-delimited block) | `~/.config/omarchy/extensions/omarchy-menu.jsonc` | removed; the rest of the file is untouched | same |
 | The extension file itself, when none existed | same file, written as `{}` | removed, with the directory if that left it empty | same |
 | One `.bak` of the menu file, plus `.bak.<epoch>` files from 1.0 | next to the menu file | removed when it holds our rows or is the `{}` we wrote; a backup written by something else is kept | same |
-| One desktop entry per quicklink | `~/.local/share/applications/<Name>.desktop` | kept — your data, and still launches | removed (only entries carrying `X-Omarchy-Quicklink=true`) |
-| Fetched site icons | `~/.local/share/icons/hicolor/256x256/apps/<name>.png` | kept | removed (only icons named after a quicklink), then empty parent directories |
 | The plugin's enabled state | `~/.config/omarchy/shell.json` | handled by `omarchy plugin remove` | same |
 
 `update-desktop-database` and `gtk-update-icon-cache` are run after changes so
@@ -284,9 +291,8 @@ the caches those tools own are rebuilt; the plugin writes nothing else. It
 never touches `~/.config/hypr/`, adds no autostart entries, systemd units or
 symlinks, and creates no directories of its own beyond the ones above.
 `uninstall` is idempotent, deletes nothing it did not create, and removes a
-directory only when it is empty. Without `--purge`, your quicklinks stay and
-keep working because their `Exec` line calls `omarchy-launch-browser`, not the
-plugin. Run `bin/quicklinks export` first if you want a copy to import later.
+directory only when it is empty. To bring an exported list back after a
+reinstall, run `bin/quicklinks import <file>`.
 
 ## See also
 
