@@ -13,6 +13,8 @@
 set -euo pipefail
 
 DESKTOP_DIR="$HOME/.local/share/applications"
+MENU_EXTENSION="${OMARCHY_MENU_EXTENSION:-$HOME/.config/omarchy/extensions/omarchy-menu.jsonc}"
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 ICON_DIR="$HOME/.local/share/icons/hicolor/256x256/apps"
 MARKER="X-Omarchy-Quicklink=true"
 FALLBACK_ICON="web-browser"
@@ -132,6 +134,133 @@ cmd_open() {
   echo "ok"
 }
 
+# ------------------------------------------------------------- menu-driven
+#
+# A quicklink needs only a name and a URL, so the menu can collect both itself
+# with omarchy-menu-input. That keeps this path free of any dependency on the
+# panel or on custom IPC, which the reload burst during `omarchy plugin add`
+# can leave unregistered.
+cmd_menu_new() {
+  local name url
+  name=$(omarchy-menu-input "Quicklink name") || exit 0
+  name=$(printf '%s' "$name" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+  [[ -n $name ]] || exit 0
+
+  url=$(omarchy-menu-input "URL for \"$name\"") || exit 0
+  url=$(printf '%s' "$url" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+  [[ -n $url ]] || exit 0
+
+  if cmd_add "$name" "$url" >/dev/null 2>&1; then
+    omarchy-notification-send "Quicklink created" "$name" 2>/dev/null || true
+  else
+    omarchy-notification-send -u critical "Could not create quicklink" "$name" 2>/dev/null ||
+      echo "Could not create quicklink: $name" >&2
+  fi
+}
+
+# Pick a quicklink from the menu and delete it, mirroring omarchy-webapp-remove.
+cmd_pick_remove() {
+  local names=() name sel answer
+  mapfile -t names < <(cmd_list | cut -f1)
+
+  if ((${#names[@]} == 0)); then
+    omarchy-notification-send "No quicklinks to remove" 2>/dev/null || echo "No quicklinks to remove."
+    exit 0
+  fi
+
+  sel=$(omarchy-menu-select "Select quicklink to remove" "${names[@]}" -- --width 520 --maxheight 520) || exit 0
+  [[ -n $sel ]] || exit 0
+
+  answer=$(omarchy-menu-select "Delete quicklink \"$sel\"?" "Delete" "Cancel") || exit 0
+  [[ $answer == "Delete" ]] || exit 0
+
+  cmd_remove "$sel" >/dev/null
+  omarchy-notification-send "Quicklink removed" "$sel" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------- menu rows
+#
+# The Omarchy menu is one JSONC file with no plugin API, so the plugin adds its
+# own rows. Every row carries a `when` guard testing for this script, so if the
+# plugin goes away the rows stop appearing rather than erroring.
+
+menu_block() {
+  cat <<JSONC
+  // >>> omarchy-quicklinks (added by: quicklinks menu-install)
+  "quicklinks": {"icon":"","label":"Quicklinks","aliases":["quicklink","links","bookmarks"],"description":"Open a saved link in the default browser","when":"[ -x '$SELF' ] && grep -qsl 'X-Omarchy-Quicklink=true' \$HOME/.local/share/applications/*.desktop","action":"omarchy-shell micull199.quicklinks toggle"},
+  "install.quicklink": {"icon":"󰉉","label":"Quicklink","description":"A named URL that opens in your default browser","when":"[ -x '$SELF' ]","action":"'$SELF' menu-new"},
+  "remove.quicklink": {"icon":"󰭌","label":"Quicklink","when":"[ -x '$SELF' ] && grep -qsl 'X-Omarchy-Quicklink=true' \$HOME/.local/share/applications/*.desktop","action":"'$SELF' pick-remove"},
+  // <<< omarchy-quicklinks
+JSONC
+}
+
+menu_current_block() {
+  local file="$1"
+  [[ -f $file ]] || return 0
+  awk '
+    index($0, "// >>> omarchy-quicklinks") { inside = 1 }
+    inside { print }
+    inside && index($0, "// <<< omarchy-quicklinks") { inside = 0 }
+  ' "$file"
+}
+
+menu_strip() {
+  local file="$1" tmp
+  [[ -f $file ]] || return 0
+  tmp=$(mktemp)
+  awk '
+    index($0, "// >>> omarchy-quicklinks") { skip = 1; next }
+    skip && index($0, "// <<< omarchy-quicklinks") { skip = 0; next }
+    !skip
+  ' "$file" >"$tmp" && mv "$tmp" "$file"
+}
+
+cmd_menu_install() {
+  local file="$MENU_EXTENSION" tmp out
+  mkdir -p "$(dirname "$file")"
+  [[ -f $file ]] || printf '{\n}\n' >"$file"
+
+  # Already correct: touch nothing, so this is safe on every shell start.
+  if [[ $(menu_current_block "$file") == "$(menu_block)" ]]; then
+    echo "ok"
+    return 0
+  fi
+
+  grep -qE '^[[:space:]]*\}[[:space:]]*$' "$file" ||
+    die "$file has no closing brace on a line of its own; refusing to edit it"
+
+  cp "$file" "$file.bak.$(date +%s)"
+  menu_strip "$file"
+
+  tmp=$(mktemp)
+  menu_block >"$tmp"
+  out=$(mktemp)
+  awk '
+    NR == FNR { block[FNR] = $0; nb = FNR; next }
+    { lines[FNR] = $0; nl = FNR }
+    END {
+      last = 0
+      for (i = 1; i <= nl; i++) if (lines[i] ~ /^[[:space:]]*\}[[:space:]]*$/) last = i
+      for (i = 1; i <= nl; i++) {
+        if (i == last) for (j = 1; j <= nb; j++) print block[j]
+        print lines[i]
+      }
+    }
+  ' "$tmp" "$file" >"$out" && mv "$out" "$file"
+  rm -f "$tmp"
+
+  command -v omarchy >/dev/null 2>&1 && omarchy menu refresh >/dev/null 2>&1 || true
+  echo "ok"
+}
+
+cmd_menu_uninstall() {
+  [[ -f $MENU_EXTENSION ]] || { echo "ok"; return 0; }
+  cp "$MENU_EXTENSION" "$MENU_EXTENSION.bak.$(date +%s)"
+  menu_strip "$MENU_EXTENSION"
+  command -v omarchy >/dev/null 2>&1 && omarchy menu refresh >/dev/null 2>&1 || true
+  echo "ok"
+}
+
 case "${1:-list}" in
 list) cmd_list ;;
 add)
@@ -146,5 +275,9 @@ open)
   shift
   cmd_open "$@"
   ;;
-*) die "usage: quicklinks <list|add|remove|open> [args]" ;;
+menu-new) cmd_menu_new ;;
+pick-remove) cmd_pick_remove ;;
+menu-install) cmd_menu_install ;;
+menu-uninstall) cmd_menu_uninstall ;;
+*) die "usage: quicklinks <list|add|remove|open|menu-new|pick-remove|menu-install|menu-uninstall> [args]" ;;
 esac

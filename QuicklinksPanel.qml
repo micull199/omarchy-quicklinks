@@ -123,6 +123,18 @@ Panel {
     }
   }
 
+  // Adds the Omarchy menu rows (Quicklinks, Install > Quicklink,
+  // Remove > Quicklink). The menu has no plugin API, so this is the only way
+  // they can appear automatically. menu-install does nothing when the rows are
+  // already correct, so running it on every shell start is cheap and leaves
+  // the file untouched. `quicklinks menu-uninstall` removes them again.
+  Process {
+    id: menuInstallProc
+    command: [root.backend, "menu-install"]
+  }
+
+  Component.onCompleted: menuInstallProc.running = true
+
   Process {
     id: actionProc
     stderr: StdioCollector {

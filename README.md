@@ -15,9 +15,24 @@ default. Use it for links you want to reach fast by a logical name — `Invoices
 omarchy plugin add https://github.com/micull199/omarchy-quicklinks --enable
 ```
 
-Omarchy asks which bar section to put the icon in. That's the whole setup.
+Omarchy asks which bar section to put the icon in. The menu rows install
+themselves the first time the plugin loads. If they don't appear, run
+`omarchy restart shell` — `omarchy plugin add` reloads the plugin once per file
+as it clones, and that burst can leave the shell out of step.
 
-Remove it with `omarchy plugin remove micull199.quicklinks`.
+Remove it with `omarchy plugin remove micull199.quicklinks` (run
+`bin/quicklinks menu-uninstall` first for a spotless removal).
+
+## Three ways to reach a quicklink
+
+**App launcher (`SUPER + SPACE`)** — type the name and press Enter. Every
+quicklink is an ordinary desktop entry, exactly like an Omarchy web app, so it
+is searchable alongside your applications.
+
+**Omarchy menu** — `Quicklinks` opens the panel, `Install > Quicklink` adds one,
+`Remove > Quicklink` deletes one.
+
+**Bar icon** — click it for the searchable panel below.
 
 ## Use
 
@@ -34,8 +49,28 @@ Click the bar icon. The panel opens with the search box focused:
 The **+** button in the footer adds a link: a name, a URL, `Enter` to save. A
 URL without a scheme gets `https://` prepended.
 
-Your quicklinks are also ordinary app-launcher entries, so `SUPER + SPACE` and
-typing the name works too.
+`Install > Quicklink` in the Omarchy menu does the same thing without the
+panel — it asks for a name, then a URL, using the menu's own prompts.
+
+## Menu rows
+
+The Omarchy menu is driven by a single JSONC file and has no plugin API, so the
+plugin adds its rows itself: it runs `menu-install` each time it loads, which
+does nothing when the rows are already correct.
+
+```bash
+bin/quicklinks menu-install     # add the three rows
+bin/quicklinks menu-uninstall   # take them away again
+```
+
+It splices a marker-delimited block into
+`~/.config/omarchy/extensions/omarchy-menu.jsonc`, backing the file up first.
+Every row carries a `when` guard testing for this script, so if you remove the
+plugin without running `menu-uninstall` the rows stop appearing rather than
+erroring.
+
+The Layouts plugin writes to the same file inside its own markers; the two
+blocks are independent and neither disturbs the other.
 
 ### Opening it from the keyboard
 
@@ -86,7 +121,13 @@ live in one place and are testable on their own:
 bin/quicklinks list
 bin/quicklinks add "Invoices" "https://books.example.com/invoices"
 bin/quicklinks remove "Invoices"
+bin/quicklinks menu-new         # name + URL via the menu's own prompts
+bin/quicklinks pick-remove      # pick one from the menu and delete it
 ```
+
+`menu-new` and `pick-remove` use the menu's prompts directly rather than the
+panel, so they keep working even when the shell is out of step after an
+install.
 
 ## Uninstall
 
