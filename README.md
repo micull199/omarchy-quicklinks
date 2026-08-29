@@ -1,125 +1,103 @@
-# Omarchy Quicklinks
+# Quicklinks
 
-Named URLs that open in your **default browser**, reachable by name from the
-Omarchy menu and the app launcher.
+An Omarchy shell plugin. Named URLs that open in your **default browser**,
+searchable from a bar icon.
 
-Omarchy already ships **Web Apps**, which install a launcher that opens a site
-in a dedicated Chromium `--app` window. Quicklinks are the other half of that
-idea: same install flow, same icons, same app-launcher integration, but the link
-opens as a normal tab in whatever browser `xdg-settings` says is your default.
-
-Use it for links you want to reach fast by a logical name — `Invoices`,
-`Standup Notes`, `Staging` — rather than sites you want as standalone apps.
-
-## Requirements
-
-Omarchy 4.x. Everything else it depends on (`gum`, `omarchy-menu-select`,
-`omarchy-launch-browser`, `omarchy-webapp-install`) already ships with Omarchy.
+Omarchy's built-in **Web Apps** install a launcher that opens a site in a
+dedicated Chromium `--app` window. Quicklinks are the other half of that idea:
+the link opens as a normal tab in whatever browser `xdg-settings` says is your
+default. Use it for links you want to reach fast by a logical name — `Invoices`,
+`Standup Notes`, `Staging`.
 
 ## Install
 
-> **Not installable with `omarchy plugin add`.** That command is for Quickshell
-> shell plugins — QML loaded into the `omarchy-shell` process, requiring a
-> `manifest.json`. This is a CLI plugin: shell scripts plus menu entries. Use
-> the `git clone` + `./install.sh` steps below.
-
 ```bash
-git clone <this-repo> ~/src/omarchy-quicklinks
-cd ~/src/omarchy-quicklinks
-./install.sh
+omarchy plugin add https://github.com/micull199/omarchy-quicklinks --enable
 ```
 
-`install.sh` symlinks two commands into `~/.local/bin` and adds four entries to
-`~/.config/omarchy/extensions/omarchy-menu.jsonc`. Symlinks mean `git pull`
-updates the installed commands; pass `--copy` if you would rather it copy them
-and not depend on this checkout staying put.
+Omarchy asks which bar section to put the icon in. That's the whole setup.
 
-Nothing is written outside `$HOME`, so `omarchy update` will not clobber it.
+Remove it with `omarchy plugin remove micull199.quicklinks`.
 
 ## Use
 
-| What | Where |
+Click the bar icon. The panel opens with the search box focused:
+
+| Key | Does |
 | --- | --- |
-| Add a quicklink | Menu → Install → Quicklink |
-| Open one | Menu → Quicklinks, or search its name in the app launcher (SUPER + SPACE) |
-| Rename / change URL | Menu → Setup → Quicklinks |
-| Delete one | Menu → Remove → Quicklink |
+| Type | Filter by name or URL |
+| `Enter` | Open the highlighted link |
+| `↑` / `↓` | Move the highlight |
+| `Esc` | Close |
+| `Shift+Delete` | Delete the highlighted link |
 
-From a terminal:
+The **+** button in the footer adds a link: a name, a URL, `Enter` to save. A
+URL without a scheme gets `https://` prepended.
 
-```bash
-omarchy-quicklinks new "Invoices" "https://books.example.com/invoices"
-omarchy-quicklinks open Invoices
-omarchy-quicklinks list
-omarchy-quicklinks remove Invoices
-```
+Your quicklinks are also ordinary app-launcher entries, so `SUPER + SPACE` and
+typing the name works too.
 
-`new` prompts for a name and URL when you give it none. A URL without a scheme
-gets `https://` prepended.
+### Opening it from the keyboard
 
-### Optional keybinding
-
-Add to `~/.config/hypr/bindings.lua`:
+The panel registers an IPC target, so you can bind it in
+`~/.config/hypr/bindings.lua`:
 
 ```lua
-o.bind("SUPER + SHIFT + U", "Quicklinks", "omarchy-quicklinks open")
+o.bind("SUPER + SHIFT + U", "Quicklinks", "omarchy-shell micull199.quicklinks toggle")
 ```
 
-Check for a conflict first with `omarchy menu keybindings --print`. The
-installer deliberately does not touch your bindings file.
+Check for conflicts first with `omarchy menu keybindings --print`.
 
 ## How it works
 
-Each quicklink is an ordinary desktop entry in
-`~/.local/share/applications/<Name>.desktop`:
+Each quicklink is a desktop entry in `~/.local/share/applications/<Name>.desktop`
+carrying a marker key:
 
 ```ini
 [Desktop Entry]
 Name=Invoices
-Exec=omarchy-launch-quicklink "https://books.example.com/invoices"
+Exec=omarchy-launch-browser "https://books.example.com/invoices"
 Icon=invoices
 Type=Application
+X-Omarchy-Quicklink=true
 ```
 
-Storing them as desktop entries means they show up in the app launcher with a
-real icon for free, and the URL lives in the entry itself rather than in a
-parallel data file that could drift.
+Two deliberate choices there:
 
-The entry is written by Omarchy's own `omarchy-webapp-install`, using its
-documented fourth argument to override the `Exec` line. That way icon fetching
-(apple-touch-icon → `/apple-touch-icon.png` → Google's favicon service) and the
-`.desktop` format stay byte-identical to Web Apps. If no icon can be fetched,
-the quicklink is still created with a generic themed icon.
+- **The `Exec` line calls `omarchy-launch-browser`,** an Omarchy built-in, not
+  anything owned by this plugin. So if you remove the plugin, your quicklinks
+  keep working as launcher entries — you just lose the panel that manages them.
+  Nothing is ever left dangling.
+- **`X-Omarchy-Quicklink=true` is the marker,** rather than the `Exec` command.
+  That keeps quicklinks and Omarchy web apps cleanly separate: neither shows up
+  in the other's list.
 
-`omarchy-launch-quicklink` is what makes it a quicklink rather than a web app.
-It hands the URL to `omarchy-launch-browser`, which resolves your default
-browser, launches it under a transient systemd unit, and focuses the window.
+Entries are written by Omarchy's own `omarchy-webapp-install`, using its
+documented custom-exec argument, so icon fetching (apple-touch-icon →
+`/apple-touch-icon.png` → Google's favicon service) and the `.desktop` format
+are upstream's, not a reimplementation. If no icon can be fetched the quicklink
+is still created, with a generic themed icon.
 
-Because the `Exec` marker differs from `omarchy-launch-webapp`, quicklinks never
-appear in Omarchy's web-app removal picker, and web apps never appear in this
-plugin's — the two features stay cleanly separated.
+`QuicklinksPanel.qml` is the bar widget. It shells out to `bin/quicklinks`
+inside the plugin folder for everything that touches disk, so the storage rules
+live in one place and are testable on their own:
+
+```bash
+bin/quicklinks list
+bin/quicklinks add "Invoices" "https://books.example.com/invoices"
+bin/quicklinks remove "Invoices"
+```
 
 ## Uninstall
 
-```bash
-./uninstall.sh            # keeps your quicklinks
-./uninstall.sh --purge    # deletes them too
-```
-
-## Notes and limits
-
-- Renaming a quicklink keeps its existing icon file, which is still named after
-  the original name. Harmless, but it is why renaming never re-downloads.
-- A name that collides with a non-quicklink desktop entry is refused rather than
-  overwritten, so you cannot clobber a web app or a real application.
-- `omarchy refresh config omarchy/extensions/omarchy-menu.jsonc` resets the menu
-  extension file. Re-run `./install.sh` to restore the entries.
+`omarchy plugin remove micull199.quicklinks` deletes the plugin folder and its
+`shell.json` entry. Your quicklinks stay — they're your data, and they still
+work. Delete them from the panel first if you want them gone.
 
 ## See also
 
-[Omarchy Layouts](https://github.com/micull199/omarchy-layouts) — open a whole
-group of apps at once. The two plugins share the same menu-splice convention and
-can be installed side by side.
+[Layouts](https://github.com/micull199/omarchy-layouts) — launch a named group
+of apps at once.
 
 ## License
 

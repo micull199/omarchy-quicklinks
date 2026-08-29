@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "micull199.quicklinks",
+  "name": "Quicklinks",
+  "version": "1.0.0",
+  "author": "Michael Cullen",
+  "license": "MIT",
+  "description": "Named URLs that open in your default browser, searchable from the bar.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "QuicklinksPanel.qml"
+  },
+  "barWidget": {
+    "displayName": "Quicklinks",
+    "description": "One bar icon and a search box: type a few letters of a saved link's name and press Enter to open it in your default browser.",
+    "category": "Launchers",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

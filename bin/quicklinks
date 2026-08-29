@@ -1,0 +1,150 @@
+#!/bin/bash
+
+# Backend for the Quicklinks Omarchy shell plugin.
+#
+# Lives inside the plugin folder and is invoked by Panel.qml with an absolute
+# path, so it is installed and removed with the plugin and never touches PATH.
+#
+# A quicklink is a desktop entry carrying X-Omarchy-Quicklink=true. The Exec
+# line calls omarchy-launch-browser, an Omarchy built-in, rather than anything
+# owned by this plugin — so removing the plugin leaves working launcher entries
+# behind instead of dangling ones.
+
+set -euo pipefail
+
+DESKTOP_DIR="$HOME/.local/share/applications"
+ICON_DIR="$HOME/.local/share/icons/hicolor/256x256/apps"
+MARKER="X-Omarchy-Quicklink=true"
+FALLBACK_ICON="web-browser"
+
+die() {
+  echo "$*" >&2
+  exit 1
+}
+
+is_quicklink() {
+  [[ -f $1 ]] && grep -qxF "$MARKER" "$1" 2>/dev/null
+}
+
+desktop_file() { printf '%s\n' "$DESKTOP_DIR/$1.desktop"; }
+
+safe_icon_name() {
+  printf '%s\n' "$1" |
+    tr '[:upper:]' '[:lower:]' |
+    sed 's/[^[:alnum:]]\+/-/g; s/^-//; s/-$//'
+}
+
+escape_exec() {
+  local url="$1"
+  url=${url//\\/\\\\}
+  url=${url//\"/\\\"}
+  url=${url//%/%%}
+  printf '"%s"' "$url"
+}
+
+unescape_exec() {
+  local url="$1"
+  [[ $url == \"*\" ]] && url=${url:1:${#url}-2}
+  url=${url//%%/%}
+  url=${url//\\\"/\"}
+  url=${url//\\\\/\\}
+  printf '%s\n' "$url"
+}
+
+normalize_url() {
+  local url="$1"
+  [[ -n $url ]] || return 1
+  [[ $url =~ ^[a-zA-Z][a-zA-Z0-9+.-]*: ]] || url="https://$url"
+  printf '%s\n' "$url"
+}
+
+url_of() {
+  local file="$1" raw
+  raw=$(sed -n 's|^Exec=omarchy-launch-browser[[:space:]]*||p' "$file" | head -1)
+  [[ -n $raw ]] || return 1
+  unescape_exec "$raw"
+}
+
+icon_of() {
+  sed -n 's/^Icon=//p' "$1" | head -1
+}
+
+# Tab-separated "name<TAB>url<TAB>icon", sorted by name. Panel.qml parses this.
+cmd_list() {
+  [[ -d $DESKTOP_DIR ]] || return 0
+  local file name url icon
+  while IFS= read -r -d '' file; do
+    is_quicklink "$file" || continue
+    name=$(basename "${file%.desktop}")
+    url=$(url_of "$file") || continue
+    icon=$(icon_of "$file")
+    printf '%s\t%s\t%s\n' "$name" "$url" "$icon"
+  done < <(find "$DESKTOP_DIR" -maxdepth 1 -type f -name '*.desktop' -print0 2>/dev/null) | sort -f
+}
+
+cmd_add() {
+  local name="${1:-}" url="${2:-}" icon="${3:-}" target exec_cmd
+
+  [[ -n $name ]] || die "a name is required"
+  [[ $name != */* ]] || die "a name cannot contain \"/\""
+  [[ $name != .* ]] || die "a name cannot start with a dot"
+  url=$(normalize_url "$url") || die "a URL is required"
+
+  target=$(desktop_file "$name")
+  if [[ -e $target ]] && ! is_quicklink "$target"; then
+    die "\"$name\" already exists and is not a quicklink"
+  fi
+
+  exec_cmd="omarchy-launch-browser $(escape_exec "$url")"
+
+  # Delegate to Omarchy's own installer for icon fetching and the .desktop
+  # format; argument 4 overrides the Exec line, an empty argument 3 triggers
+  # the icon auto-fetch chain.
+  if ! omarchy-webapp-install "$name" "$url" "$icon" "$exec_cmd" >/dev/null 2>&1; then
+    omarchy-webapp-install "$name" "$url" "$FALLBACK_ICON" "$exec_cmd" >/dev/null ||
+      die "could not create \"$name\""
+  fi
+
+  grep -qxF "$MARKER" "$target" 2>/dev/null || printf '%s\n' "$MARKER" >>"$target"
+  update-desktop-database "$DESKTOP_DIR" &>/dev/null || true
+  echo "ok"
+}
+
+cmd_remove() {
+  local name="${1:-}" target icon
+  [[ -n $name ]] || die "a name is required"
+  target=$(desktop_file "$name")
+  is_quicklink "$target" || die "no such quicklink: $name"
+
+  icon=$(safe_icon_name "$name")
+  rm -f "$target" "$ICON_DIR/$icon.png" "$ICON_DIR/$name.png"
+  update-desktop-database "$DESKTOP_DIR" &>/dev/null || true
+  echo "ok"
+}
+
+cmd_open() {
+  local name="${1:-}" target url
+  [[ -n $name ]] || die "a name is required"
+  target=$(desktop_file "$name")
+  is_quicklink "$target" || die "no such quicklink: $name"
+  url=$(url_of "$target") || die "could not read the URL for $name"
+  setsid omarchy-launch-browser "$url" >/dev/null 2>&1 &
+  echo "ok"
+}
+
+case "${1:-list}" in
+list) cmd_list ;;
+add)
+  shift
+  cmd_add "$@"
+  ;;
+remove)
+  shift
+  cmd_remove "$@"
+  ;;
+open)
+  shift
+  cmd_open "$@"
+  ;;
+*) die "usage: quicklinks <list|add|remove|open> [args]" ;;
+esac
