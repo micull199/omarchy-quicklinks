@@ -19,9 +19,12 @@ T=$(mktemp -d "$SCRATCH_BASE/quicklinks-test.XXXXXX")
 trap 'rm -rf "$T"' EXIT
 
 export HOME="$T/home"
-export OMARCHY_QUICKLINKS_DESKTOP_DIR="$T/desktop"
-export OMARCHY_QUICKLINKS_ICON_DIR="$T/icons"
+export OMARCHY_QUICKLINKS_DATA_DIR="$T/data"          # stands in for <plugin>/data
+export OMARCHY_QUICKLINKS_ICON_DIR="$T/data/icons"
+export OMARCHY_QUICKLINKS_DESKTOP_DIR="$T/desktop"    # where the launcher symlinks go
+export OMARCHY_QUICKLINKS_LEGACY_ICON_DIR="$T/legacy-icons"
 export OMARCHY_MENU_EXTENSION="$T/ext/omarchy-menu.jsonc"
+ENTRY_DIR="$T/data/applications"
 export BROWSER_LOG="$T/browser.log"
 mkdir -p "$HOME" "$T/bin"
 
@@ -64,7 +67,11 @@ assert_not_contains() { [[ $3 != *"$2"* ]] && ok || ko "$1"$'\n  did not want: '
 
 L() { "$Q" "$@"; }
 MARKER_LINE="X-Omarchy-Quicklink=true"
-entry() { printf '%s\n' "$OMARCHY_QUICKLINKS_DESKTOP_DIR/$1.desktop"; }
+entry() { printf '%s\n' "$ENTRY_DIR/$1.desktop"; }
+link() { printf '%s\n' "$OMARCHY_QUICKLINKS_DESKTOP_DIR/omarchy-quicklink-$1.desktop"; }
+assert_link() { # <label> <name>: launcher symlink points at the real entry
+  if [[ -L $(link "$2") && $(readlink "$(link "$2")") == "$(entry "$2")" && -e $(link "$2") ]]; then ok; else ko "$1: no symlink $(link "$2") -> $(entry "$2")"; fi
+}
 icon() { printf '%s\n' "$OMARCHY_QUICKLINKS_ICON_DIR/$1.png"; }
 exec_of() { grep '^Exec=' "$(entry "$1")" | cut -d= -f2-; }
 # Wait for the detached fetch-icon started by add/edit; curl is stubbed to fail
@@ -110,7 +117,11 @@ start=$(date +%s%N)
 assert_eq "add prints ok" "ok" "$(L add Invoices https://books.example.com/invoices)"
 elapsed=$(( ($(date +%s%N) - start) / 1000000 ))
 (( elapsed < 1000 )) && ok || ko "add took ${elapsed}ms; expected well under a second"
-assert_file "entry written" "$(entry Invoices)"
+assert_file "entry written inside data dir" "$(entry Invoices)"
+assert_link "launcher symlink created" Invoices
+assert_eq "symlink is the only thing in the launcher dir" "omarchy-quicklink-Invoices.desktop" "$(ls -A "$OMARCHY_QUICKLINKS_DESKTOP_DIR")"
+assert_eq "Name= is unprefixed" "Name=Invoices" "$(grep '^Name=' "$(entry Invoices)")"
+assert_ok "symlink parses as a desktop entry" desktop-file-validate "$(link Invoices)"
 assert_eq "fallback icon written immediately" "Icon=web-browser" "$(grep '^Icon=' "$(entry Invoices)")"
 assert_eq "list row" $'Invoices\thttps://books.example.com/invoices\tweb-browser\tfalse' "$(L list)"
 assert_eq "info rows" $'url\thttps://books.example.com/invoices\nicon\tweb-browser\nprivate\tfalse' "$(L info Invoices)"
@@ -123,6 +134,7 @@ settle
 assert_contains "icon fetch attempted in background" "apple-touch-icon" "$(cat "$T/curl.log")"
 assert_eq "failed fetch keeps fallback icon" "Icon=web-browser" "$(grep '^Icon=' "$(entry Invoices)")"
 assert_eq "failed fetch leaves no icon file" "" "$(ls -A "$OMARCHY_QUICKLINKS_ICON_DIR" 2>/dev/null)"
+assert_no_file "nothing written to the legacy icon dir" "$OMARCHY_QUICKLINKS_LEGACY_ICON_DIR"
 assert_fails "info missing" L info Nope
 assert_eq "add --icon skips fetch" "ok" "$(L add Iconed https://iconed.example.com --icon my-icon)"
 assert_eq "add --icon sets Icon=" "Icon=my-icon" "$(grep '^Icon=' "$(entry Iconed)")"
@@ -140,6 +152,7 @@ assert_fails "leading dot" L add ".hidden" https://x.example
 assert_eq "slash error to stderr" 'a name cannot contain "/"' "$(L add "a/b" https://x.example 2>&1 >/dev/null)"
 assert_eq "trimmed name saves" "ok" "$(L add "  Trimmed  " https://t.example)"
 assert_file "trimmed entry" "$(entry Trimmed)"
+assert_link "trimmed symlink" Trimmed
 assert_no_file "untrimmed entry absent" "$(entry "  Trimmed  ")"
 assert_eq "trimmed Name=" "Name=Trimmed" "$(grep '^Name=' "$(entry Trimmed)")"
 assert_eq "info accepts untrimmed name" $'url\thttps://t.example' "$(L info "  Trimmed " | head -1)"
@@ -197,6 +210,11 @@ assert_eq "original intact" "https://books.example.com/invoices" "$(L info Invoi
 assert_fails "non-quicklink collision refused" L add Other https://other.example
 assert_eq "non-quicklink collision message" '"Other" already exists and is not a quicklink' "$(L add Other https://other.example 2>&1 >/dev/null)"
 assert_eq "non-quicklink untouched" $'[Desktop Entry]\nName=Other\nExec=true\nType=Application' "$(cat "$(entry Other)")"
+printf '[Desktop Entry]\nName=Taken\nExec=true\nType=Application\n' >"$(link Taken)"
+assert_fails "foreign file at the symlink path refused" L add Taken https://taken.example
+assert_no_file "foreign collision wrote no entry" "$(entry Taken)"
+assert_eq "foreign file untouched" "Name=Taken" "$(grep '^Name=' "$(link Taken)")"
+rm -f "$(link Taken)"
 
 # ================================================================ private
 echo "# private"
@@ -229,13 +247,15 @@ assert_fails "open non-quicklink" L open Other
 echo "# edit"
 mkdir -p "$OMARCHY_QUICKLINKS_ICON_DIR"
 printf 'PNG' >"$(icon invoices)"
-sed -i 's/^Icon=.*/Icon=invoices/' "$(entry Invoices)"
+sed -i "s|^Icon=.*|Icon=$(icon invoices)|" "$(entry Invoices)"
 assert_eq "edit rename ok" "ok" "$(L edit Invoices --name Bills)"
 assert_no_file "old entry gone" "$(entry Invoices)"
+assert_no_file "old symlink gone" "$(link Invoices)"
 assert_file "new entry present" "$(entry Bills)"
+assert_link "new symlink present" Bills
 assert_eq "renamed Name=" "Name=Bills" "$(grep '^Name=' "$(entry Bills)")"
 assert_eq "renamed keeps url" "https://books.example.com/invoices" "$(L info Bills | head -1 | cut -f2)"
-assert_eq "renamed icon follows" $'icon\tbills' "$(L info Bills | grep -P '^icon\t')"
+assert_eq "renamed icon follows (absolute path)" "icon"$'\t'"$(icon bills)" "$(L info Bills | grep -P '^icon\t')"
 assert_file "icon file renamed" "$(icon bills)"
 assert_no_file "old icon file gone" "$(icon invoices)"
 assert_valid "desktop-file-validate renamed" Bills
@@ -251,7 +271,7 @@ assert_file "same-name rename keeps entry" "$(entry Bills)"
 : >"$T/curl.log"
 assert_eq "edit url ok" "ok" "$(L edit Bills --url https://books.example.com/bills)"
 assert_eq "edit url applied" "https://books.example.com/bills" "$(L info Bills | head -1 | cut -f2)"
-assert_eq "edit url keeps icon" $'icon\tbills' "$(L info Bills | grep -P '^icon\t')"
+assert_eq "edit url keeps icon" "icon"$'\t'"$(icon bills)" "$(L info Bills | grep -P '^icon\t')"
 settle
 assert_eq "same host: no refetch" "" "$(cat "$T/curl.log")"
 # URL change to another host refetches.
@@ -266,7 +286,7 @@ assert_eq "edit --no-private ok" "ok" "$(L edit Bills --no-private)"
 assert_eq "edit --no-private applied" $'private\tfalse' "$(L info Bills | grep -P '^private\t')"
 assert_not_contains "private marker removed" "Private" "$(cat "$(entry Bills)")"
 assert_eq "edit rename+url+private at once" "ok" "$(L edit Bills --name Ledger --url https://ledger.example.org/y --private)"
-assert_eq "combined edit result" $'url\thttps://ledger.example.org/y\nicon\tledger\nprivate\ttrue' "$(L info Ledger)"
+assert_eq "combined edit result" "url"$'\t'"https://ledger.example.org/y"$'\n'"icon"$'\t'"$(icon ledger)"$'\n'"private"$'\t'"true" "$(L info Ledger)"
 assert_file "combined edit icon renamed" "$(icon ledger)"
 assert_fails "edit missing" L edit Nope --url https://x.example
 assert_fails "edit non-quicklink" L edit Other --url https://x.example
@@ -279,7 +299,9 @@ echo "# fetch-icon"
 stub curl 'for a in "$@"; do [ "$prev" = -o ] && printf "PNG" >"$a"; prev=$a; done; exit 0'
 assert_ok "fetch-icon exits 0" L fetch-icon Bare https://example.com/path
 assert_file "fetched icon written" "$(icon bare)"
-assert_eq "Icon= rewritten after fetch" "Icon=bare" "$(grep '^Icon=' "$(entry Bare)")"
+assert_eq "Icon= rewritten to an absolute path in data/" "Icon=$(icon bare)" "$(grep '^Icon=' "$(entry Bare)")"
+assert_valid "desktop-file-validate absolute icon" Bare
+assert_no_file "fetch wrote nothing to the legacy icon dir" "$OMARCHY_QUICKLINKS_LEGACY_ICON_DIR"
 assert_ok "fetch-icon for removed entry exits 0" L fetch-icon Ghost https://ghost.example
 assert_file "orphan icon still written" "$(icon ghost)"
 assert_no_file "no entry conjured for removed link" "$(entry Ghost)"
@@ -295,6 +317,7 @@ echo "# remove"
 assert_file "icon present before remove" "$(icon bare)"
 assert_eq "remove ok" "ok" "$(L remove Bare)"
 assert_no_file "remove deletes entry" "$(entry Bare)"
+assert_no_file "remove deletes symlink" "$(link Bare)"
 assert_no_file "remove deletes icon" "$(icon bare)"
 assert_fails "remove missing" L remove Bare
 assert_fails "remove non-quicklink refused" L remove Other
@@ -303,15 +326,15 @@ assert_file "non-quicklink survives remove" "$(entry Other)"
 # ================================================================ any
 echo "# any"
 assert_ok "any with quicklinks" L any
-mv "$OMARCHY_QUICKLINKS_DESKTOP_DIR" "$T/desktop.aside"
-mkdir -p "$OMARCHY_QUICKLINKS_DESKTOP_DIR"
-cp "$T/desktop.aside/Other.desktop" "$OMARCHY_QUICKLINKS_DESKTOP_DIR/"
+mv "$ENTRY_DIR" "$T/entries.aside"
+mkdir -p "$ENTRY_DIR"
+cp "$T/entries.aside/Other.desktop" "$ENTRY_DIR/"
 assert_fails "any with only other apps" L any
 assert_eq "list empty with only other apps" "" "$(L list)"
-rm -rf "$OMARCHY_QUICKLINKS_DESKTOP_DIR"
+rm -rf "$ENTRY_DIR"
 assert_fails "any with no dir" L any
 assert_eq "list with no dir" "" "$(L list)"
-mv "$T/desktop.aside" "$OMARCHY_QUICKLINKS_DESKTOP_DIR"
+mv "$T/entries.aside" "$ENTRY_DIR"
 
 # ================================================================ menu
 echo "# menu-install / menu-uninstall"
@@ -325,7 +348,10 @@ menu_now=$(cat "$OMARCHY_MENU_EXTENSION")
 assert_contains "quicklinks is a submenu (no action)" '"quicklinks": {"icon":"󰌷","label":"Quicklinks"' "$menu_now"
 assert_not_contains "submenu row carries no action" '"label":"Quicklinks","aliases":["quicklink","links","bookmarks"],"description":"Saved links that open in your default browser","when":"[ -x '"'"'$LAYOUTS'"'"' ]","action"' "$menu_now"
 assert_contains "manage row opens the panel" '"quicklinks.manage": {"icon":"󰒓","label":"Manage quicklinks"' "$menu_now"
-assert_contains "one row per link, launch inlined" '"quicklinks.trimmed": {"icon":"󰌷","label":"Trimmed","description":"https://t.example","when":"[ -f '"'"''"$OMARCHY_QUICKLINKS_DESKTOP_DIR"'/Trimmed.desktop'"'"' ]","action":"omarchy-launch-browser '"'"'https://t.example'"'"'"}' "$menu_now"
+assert_contains "one row per link, launch inlined, guarded by the script" "\"quicklinks.trimmed\": {\"icon\":\"󰌷\",\"label\":\"Trimmed\",\"description\":\"https://t.example\",\"when\":\"[ -x '$Q' ]\",\"action\":\"omarchy-launch-browser 'https://t.example'\"}" "$menu_now"
+assert_eq "every row is guarded by the script" "$(grep -c '^  "' <<<"$(sed -n '/>>> omarchy-quicklinks/,/<<< omarchy-quicklinks/p' "$OMARCHY_MENU_EXTENSION")")" "$(grep -c "\"when\":\"\[ -x '$Q' \]" "$OMARCHY_MENU_EXTENSION")"
+assert_not_contains "no row depends on a desktop file existing" '"when":"[ -f' "$menu_now"
+assert_contains "remove plugin row" "\"remove.quicklinks-plugin\": {\"icon\":\"󰌷\",\"label\":\"Quicklinks plugin\",\"description\":\"Remove the plugin and every quicklink\",\"when\":\"[ -x '$Q' ]\",\"action\":\"omarchy-launch-floating-terminal-with-presentation '$Q' menu-uninstall-plugin\"}" "$menu_now"
 # Our block must be valid JSON on its own: rows between the markers, comments
 # dropped, trailing comma tolerated as Omarchy's JSONC reader does.
 menu_json_ok() {
@@ -347,7 +373,7 @@ assert_ok "menu-install idempotent" cmp -s "$T/menu.once" "$OMARCHY_MENU_EXTENSI
 assert_eq "single .bak, legacy pruned" "1" "$(ls "$(dirname "$OMARCHY_MENU_EXTENSION")" | grep -c '\.bak')"
 # Rows follow the entries: add/edit/remove regenerate them.
 L add "Menu Link" https://menu.example --private --icon web-browser >/dev/null
-assert_contains "add regenerates rows with private glyph and flag" '"quicklinks.menu-link": {"icon":"󰒃","label":"Menu Link","description":"https://menu.example","when":"[ -f '"'"''"$OMARCHY_QUICKLINKS_DESKTOP_DIR"'/Menu Link.desktop'"'"' ]","action":"omarchy-launch-browser --private '"'"'https://menu.example'"'"'"}' "$(cat "$OMARCHY_MENU_EXTENSION")"
+assert_contains "add regenerates rows with private glyph and flag" "\"quicklinks.menu-link\": {\"icon\":\"󰒃\",\"label\":\"Menu Link\",\"description\":\"https://menu.example\",\"when\":\"[ -x '$Q' ]\",\"action\":\"omarchy-launch-browser --private 'https://menu.example'\"}" "$(cat "$OMARCHY_MENU_EXTENSION")"
 L add "menu link" https://other.example --icon web-browser >/dev/null
 assert_contains "slug collisions stay unique" '"quicklinks.menu-link-2": {"icon":"󰌷","label":"menu link"' "$(cat "$OMARCHY_MENU_EXTENSION")"
 L remove "menu link" >/dev/null
@@ -375,7 +401,7 @@ assert_eq "still a single .bak after uninstall" "1" "$(ls "$(dirname "$OMARCHY_M
 echo "# export / import"
 # Icons the plugin fetched itself (named after the entry) are not exported;
 # a themed icon the user picked is.
-sed -i 's/^Icon=.*/Icon=ledger/' "$(entry Ledger)"
+sed -i "s|^Icon=.*|Icon=$(icon ledger)|" "$(entry Ledger)"
 export_json=$(L export -)
 assert_ok "export - is valid JSON" jq -e . <<<"$export_json"
 assert_eq "export format" "omarchy-quicklinks" "$(jq -r .format <<<"$export_json")"
@@ -398,8 +424,9 @@ assert_eq "export into a directory" "$T/Downloads-like/$(basename "$out")" "$(mk
 assert_eq "export leaves no temp files" "" "$(ls -A "$T/Downloads-like" | grep '^\.')"
 assert_eq "empty export leaves no temp files" "" "$(ls -A "$HOME/Downloads" | grep '^\.')"
 # Import into a fresh tree: everything comes back, private and icon intact.
-mv "$OMARCHY_QUICKLINKS_DESKTOP_DIR" "$T/desktop.pre-import"
+mv "$ENTRY_DIR" "$T/desktop.pre-import"
 before=$(cd "$T/desktop.pre-import" && grep -l "$MARKER_LINE" *.desktop | wc -l)
+rm -f "$OMARCHY_QUICKLINKS_DESKTOP_DIR"/omarchy-quicklink-*.desktop
 assert_eq "import ok" "imported $before skipped 0" "$(L import "$T/mine.json")"
 assert_eq "import restores list" "$(jq -r '.quicklinks[] | .name' "$T/mine.json" | sort -f)" "$(L list | cut -f1 | sort -f)"
 assert_eq "import restores raw url" 'https://q.example/say"hi"' "$(L info Quote | head -1 | cut -f2)"
@@ -417,8 +444,79 @@ assert_fails "import missing file" L import "$T/nope.json"
 assert_fails "import non-json" L import "$(entry Plain)"
 assert_fails "import needs a file" L import
 settle
-rm -rf "$OMARCHY_QUICKLINKS_DESKTOP_DIR"
-mv "$T/desktop.pre-import" "$OMARCHY_QUICKLINKS_DESKTOP_DIR"
+rm -rf "$ENTRY_DIR"
+mv "$T/desktop.pre-import" "$ENTRY_DIR"
+L sync >/dev/null   # symlinks follow the restored entries
+assert_link "sync recreates a missing symlink" Plain
+
+# ================================================================ plugin removal
+echo "# bare plugin removal (folder deleted, uninstall never runs)"
+# Simulate `omarchy plugin remove`: the data dir vanishes. The launcher symlinks
+# dangle, so nothing can parse or launch them; the menu rows' guards fail.
+L menu-install >/dev/null
+mv "$T/data" "$T/data.gone"
+assert_eq "symlinks dangle after removal" "0" "$(find "$OMARCHY_QUICKLINKS_DESKTOP_DIR" -name 'omarchy-quicklink-*.desktop' -exec test -e {} \; -print | wc -l)"
+assert_fails "dangling symlink is not a parsable desktop entry" desktop-file-validate "$(link Plain)"
+if ((HAVE_GI)); then
+  assert_not_contains "GLib cannot launch a dangling entry" "omarchy-launch-browser" "$(glib_argv "$(link Plain)")"
+fi
+# Every guard in our block fails once the script it names is gone, so no row
+# is shown. Evaluate each `when` with the script path swapped for a missing one.
+guards_alive() { # <menu file> <script>: prints how many of our rows would still show
+  python3 - "$1" "$2" <<'PY'
+import sys, re, json, subprocess
+raw = open(sys.argv[1]).read()
+block = raw.split("// >>> omarchy-quicklinks", 1)[1].split("\n", 1)[1].split("// <<< omarchy-quicklinks", 1)[0]
+block = re.sub(r'^\s*//.*$', '', block, flags=re.M).strip().rstrip(',')
+rows = json.loads('{' + block + '}')
+alive = 0
+for row in rows.values():
+    when = row.get("when", "true").replace(sys.argv[2], "/nonexistent/plugin/bin/quicklinks")
+    if subprocess.run(["bash", "-c", when]).returncode == 0:
+        alive += 1
+print(f"{len(rows)} {alive}")
+PY
+}
+read -r rows alive <<<"$(guards_alive "$OMARCHY_MENU_EXTENSION" "$Q")"
+(( rows >= 5 )) && ok || ko "expected our block to hold rows, got $rows"
+assert_eq "no row survives the script going away" "0" "$alive"
+# Reinstalling (or any load) prunes the dangling symlinks.
+mkdir -p "$OMARCHY_QUICKLINKS_DESKTOP_DIR"; ln -s "$T/nowhere.desktop" "$OMARCHY_QUICKLINKS_DESKTOP_DIR/other-dangling.desktop"
+ln -s "$T/nowhere2.desktop" "$OMARCHY_QUICKLINKS_DESKTOP_DIR/omarchy-quicklink-Ghost.desktop"
+ln -s "/some/other/plugins/micull199.quicklinks/data/applications/Old.desktop" "$OMARCHY_QUICKLINKS_DESKTOP_DIR/Old.desktop"
+assert_eq "sync on empty data ok" "ok" "$(L sync)"
+assert_eq "sync pruned every dangling symlink of ours" "" "$(find "$OMARCHY_QUICKLINKS_DESKTOP_DIR" -name 'omarchy-quicklink-*' -o -name 'Old.desktop' | tr -d '\n')"
+[[ -L $OMARCHY_QUICKLINKS_DESKTOP_DIR/other-dangling.desktop ]] && ok || ko "sync left a dangling symlink that is not ours alone"
+rm -f "$OMARCHY_QUICKLINKS_DESKTOP_DIR/other-dangling.desktop"
+mv "$T/data.gone" "$T/data"
+L sync >/dev/null
+assert_link "sync restored symlinks once data is back" Plain
+
+# ================================================================ migration
+echo "# migration from pre-1.4 layout"
+mkdir -p "$OMARCHY_QUICKLINKS_LEGACY_ICON_DIR"
+printf '[Desktop Entry]\nName=Old Link\nExec=omarchy-launch-browser "https://old.example"\nType=Application\nIcon=old-link\nX-Omarchy-Quicklink=true\n' >"$OMARCHY_QUICKLINKS_DESKTOP_DIR/Old Link.desktop"
+printf 'PNG' >"$OMARCHY_QUICKLINKS_LEGACY_ICON_DIR/old-link.png"
+printf '[Desktop Entry]\nName=No Icon\nExec=omarchy-launch-browser "https://noicon.example"\nType=Application\nIcon=no-icon\nX-Omarchy-Quicklink=true\n' >"$OMARCHY_QUICKLINKS_DESKTOP_DIR/No Icon.desktop"
+printf '[Desktop Entry]\nName=Webapp\nExec=omarchy-launch-webapp x\nType=Application\n' >"$OMARCHY_QUICKLINKS_DESKTOP_DIR/Webapp.desktop"
+assert_eq "sync migrates" "ok" "$(L sync)"
+assert_no_file "legacy regular file replaced" "$OMARCHY_QUICKLINKS_DESKTOP_DIR/Old Link.desktop"
+assert_file "legacy entry moved into data/" "$(entry "Old Link")"
+assert_link "legacy entry got a symlink" "Old Link"
+assert_file "legacy icon moved into data/" "$(icon old-link)"
+assert_no_file "legacy icon gone from the icon theme" "$OMARCHY_QUICKLINKS_LEGACY_ICON_DIR/old-link.png"
+assert_no_file "emptied legacy icon dir removed" "$OMARCHY_QUICKLINKS_LEGACY_ICON_DIR"
+assert_eq "migrated Icon= is absolute" "Icon=$(icon old-link)" "$(grep '^Icon=' "$(entry "Old Link")")"
+assert_eq "migrated entry upgraded to current format" "NoDisplay=true" "$(grep '^NoDisplay=' "$(entry "Old Link")")"
+assert_eq "migrated url intact" "https://old.example" "$(L info "Old Link" | head -1 | cut -f2)"
+assert_eq "missing legacy icon falls back" "Icon=web-browser" "$(grep '^Icon=' "$(entry "No Icon")")"
+assert_file "unrelated desktop file untouched" "$OMARCHY_QUICKLINKS_DESKTOP_DIR/Webapp.desktop"
+[[ ! -L $OMARCHY_QUICKLINKS_DESKTOP_DIR/Webapp.desktop ]] && ok || ko "unrelated desktop file turned into a symlink"
+cp -a "$T/data" "$T/data.snapshot"
+L sync >/dev/null
+assert_ok "migration is idempotent" diff -r "$T/data.snapshot" "$T/data"
+rm -rf "$T/data.snapshot" "$OMARCHY_QUICKLINKS_DESKTOP_DIR/Webapp.desktop"
+L remove "Old Link" >/dev/null; L remove "No Icon" >/dev/null
 
 # ================================================================ uninstall
 echo "# uninstall"
@@ -432,6 +530,7 @@ assert_ok "uninstall restores menu file" cmp -s "$T/menu.orig" "$OMARCHY_MENU_EX
 assert_eq "uninstall removes our .bak and legacy backups" "" "$(ls "$(dirname "$OMARCHY_MENU_EXTENSION")" | grep '\.bak')"
 assert_ok "--keep-quicklinks keeps quicklinks" L any
 assert_file "--keep-quicklinks keeps entries" "$(entry Plain)"
+assert_link "--keep-quicklinks keeps symlinks" Plain
 assert_ok "uninstall is idempotent" L uninstall --keep-quicklinks
 # A .bak that is not ours (no quicklinks rows in it) is left alone.
 L menu-install >/dev/null
@@ -451,22 +550,17 @@ assert_no_file "uninstall removes the directory it created" "$(dirname "$OMARCHY
 L menu-install >/dev/null
 L menu-uninstall >/dev/null
 assert_no_file "menu-uninstall removes the file it created" "$OMARCHY_MENU_EXTENSION"
-# Default: entries and icons go, other apps and their files stay, empty dirs go.
-mkdir -p "$OMARCHY_QUICKLINKS_ICON_DIR"
-printf 'PNG' >"$(icon plain)"; sed -i 's/^Icon=.*/Icon=plain/' "$(entry Plain)"
-printf 'PNG' >"$(icon other)"
+# Default: data dir and symlinks go, other launcher files stay, empty dirs go.
+printf '[Desktop Entry]\nName=Keep\nExec=true\nType=Application\n' >"$OMARCHY_QUICKLINKS_DESKTOP_DIR/Keep.desktop"
 n=$(L list | wc -l)
 assert_eq "uninstall default ok" "removed $n quicklink(s), menu rows and backups" "$(L uninstall)"
-assert_fails "purge leaves no quicklinks" L any
-assert_no_file "purge deletes entry" "$(entry Plain)"
-assert_no_file "purge deletes fetched icon" "$(icon plain)"
-assert_file "purge keeps a non-quicklink entry" "$(entry Other)"
-assert_file "purge keeps an icon it did not fetch" "$(icon other)"
-[[ -d $OMARCHY_QUICKLINKS_DESKTOP_DIR ]] && ok || ko "purge keeps non-empty dirs"
-rm -f "$(entry Other)" "$(entry Legacy)" "$(icon other)"
+assert_fails "uninstall leaves no quicklinks" L any
+assert_no_file "uninstall deletes the data dir" "$T/data"
+assert_no_file "uninstall deletes symlinks" "$(link Plain)"
+assert_eq "uninstall leaves only the foreign launcher file" "Keep.desktop" "$(ls -A "$OMARCHY_QUICKLINKS_DESKTOP_DIR")"
+rm -f "$OMARCHY_QUICKLINKS_DESKTOP_DIR/Keep.desktop"
 L uninstall >/dev/null
-assert_no_file "purge removes the emptied icon dir" "$OMARCHY_QUICKLINKS_ICON_DIR"
-assert_no_file "purge removes the emptied desktop dir" "$OMARCHY_QUICKLINKS_DESKTOP_DIR"
+assert_no_file "uninstall removes the emptied launcher dir" "$OMARCHY_QUICKLINKS_DESKTOP_DIR"
 assert_eq "nothing of ours left in scratch" "" "$(grep -rl 'omarchy-quicklinks\|X-Omarchy-Quicklink' "$T" --exclude-dir=bin --exclude-dir=Downloads --exclude-dir=Downloads-like --exclude=mine.json --exclude=bare.json --exclude='menu.*' 2>/dev/null)"
 assert_fails "uninstall unknown option" L uninstall --bogus
 assert_fails "uninstall --purge is gone" L uninstall --purge
@@ -475,6 +569,14 @@ stub omarchy 'echo "$@" >>"'"$T"'/omarchy.log"'
 : >"$T/omarchy.log"
 assert_ok "uninstall --remove-plugin exits 0" L uninstall --remove-plugin
 assert_contains "--remove-plugin calls omarchy plugin remove --yes" "plugin remove micull199.quicklinks --yes" "$(cat "$T/omarchy.log")"
+# The menu's Remove > Quicklinks plugin row confirms with gum, then does the same.
+stub gum 'exit 1'
+: >"$T/omarchy.log"
+assert_ok "menu-uninstall-plugin cancelled exits 0" L menu-uninstall-plugin
+assert_eq "cancelled confirm removes nothing" "" "$(cat "$T/omarchy.log")"
+stub gum 'exit 0'
+assert_ok "menu-uninstall-plugin confirmed" L menu-uninstall-plugin
+assert_contains "confirmed hands off to omarchy plugin remove" "plugin remove micull199.quicklinks --yes" "$(cat "$T/omarchy.log")"
 stub omarchy 'exit 0'
 
 # ================================================================ usage

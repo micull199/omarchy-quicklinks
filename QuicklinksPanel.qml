@@ -29,6 +29,7 @@ Panel {
   property string noticeText: ""    // non-error feedback, e.g. where an export landed
   property bool confirmOpen: false
   property string confirmName: ""   // link awaiting delete confirmation
+  property string confirmKind: "delete" // "delete" a link, or "uninstall" the plugin
 
   readonly property color fg: bar ? bar.foreground : Color.foreground
   readonly property color dim: Qt.darker(fg, 1.55)
@@ -149,7 +150,22 @@ Panel {
     var link = root.filteredLinks[root.selectedIndex]
     if (!link) return
     root.errorText = ""
+    root.confirmKind = "delete"
     root.confirmName = link.name
+    deleteConfirm.selectedIndex = 1
+    root.confirmOpen = true
+    Qt.callLater(function() { confirmKeys.forceActiveFocus() })
+  }
+
+  // Remove the plugin and every quicklink: `uninstall --remove-plugin` takes
+  // the symlinks and menu rows away, then hands off to `omarchy plugin
+  // remove`, which deletes this folder and unloads the widget. Detached, so
+  // the panel going away does not stop it.
+  function requestUninstall() {
+    root.errorText = ""
+    root.noticeText = ""
+    root.confirmKind = "uninstall"
+    root.confirmName = ""
     deleteConfirm.selectedIndex = 1
     root.confirmOpen = true
     Qt.callLater(function() { confirmKeys.forceActiveFocus() })
@@ -163,8 +179,14 @@ Panel {
 
   function confirmRemove() {
     var name = root.confirmName
+    var kind = root.confirmKind
     root.confirmOpen = false
     root.confirmName = ""
+    if (kind === "uninstall") {
+      Quickshell.execDetached([root.backend, "uninstall", "--remove-plugin"])
+      root.close()
+      return
+    }
     if (name !== "") {
       actionProc.command = [root.backend, "remove", name]
       actionProc.running = true
@@ -404,8 +426,10 @@ Panel {
         id: deleteConfirm
         anchors.fill: parent
         opened: root.confirmOpen
-        message: "Delete quicklink \"" + root.confirmName + "\"?"
-        confirmText: "Delete"
+        message: root.confirmKind === "uninstall"
+          ? "Remove the Quicklinks plugin and all " + root.links.length + " quicklink(s)? Export first if you want them back."
+          : "Delete quicklink \"" + root.confirmName + "\"?"
+        confirmText: root.confirmKind === "uninstall" ? "Remove plugin" : "Delete"
         background: Color.popups.background
         foreground: root.fg
         fontFamily: root.fontFamily
@@ -687,6 +711,16 @@ Panel {
           foreground: root.fg
           fontFamily: root.fontFamily
           onClicked: root.exportLinks()
+        }
+
+        PanelActionButton {
+          visible: !root.building
+          iconText: "󰩺"
+          tooltipText: "Remove the Quicklinks plugin and every quicklink"
+          foreground: root.fg
+          hoverColor: Color.urgent
+          fontFamily: root.fontFamily
+          onClicked: root.requestUninstall()
         }
 
         PanelActionButton {

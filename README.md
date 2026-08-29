@@ -29,7 +29,8 @@ Enter. Every quicklink is a row of its own in the menu, under `Quicklinks`: it
 shows the link glyph 󰌷 (󰒃 for a private link), the name, and "Quicklinks"
 beneath it in search results — not "Apps", which is what a desktop entry would
 say. `Quicklinks > Manage quicklinks` opens the panel; `Install > Quicklink`
-adds one and `Remove > Quicklink` deletes one (after asking).
+adds one, `Remove > Quicklink` deletes one (after asking) and
+`Remove > Quicklinks plugin` removes the plugin itself with everything it owns.
 
 **Bar icon** — click it for the searchable panel below.
 
@@ -136,11 +137,11 @@ bin/quicklinks menu-uninstall   # take them away again
 
 It splices a marker-delimited block into
 `~/.config/omarchy/extensions/omarchy-menu.jsonc`, backing the file up first.
-A link's row runs `omarchy-launch-browser` itself rather than calling back into
-the plugin, so the rows keep working if the plugin is removed — until
-`menu-uninstall` takes them away — and each is guarded by `[ -f <its entry> ]`,
-so a row disappears the moment its entry does. The plugin's own rows are
-guarded by `[ -x bin/quicklinks ]`.
+Every row in the block — the submenu, its children and each per-link row — is
+guarded by the same `when`: `[ -x <plugin folder>/bin/quicklinks ]`. Delete
+the plugin folder and every row vanishes on the next menu open, with nothing to
+clean up. A link's row runs `omarchy-launch-browser` itself rather than calling
+back into the plugin, so opening a link never depends on the script running.
 
 The Layouts plugin writes to the same file inside its own markers; the two
 blocks are independent and neither disturbs the other.
@@ -158,15 +159,28 @@ Check for conflicts first with `omarchy menu keybindings --print`.
 
 ## How it works
 
-Each quicklink is a desktop entry in `~/.local/share/applications/<Name>.desktop`
-carrying a marker key:
+Everything the plugin owns lives inside the plugin folder, under `data/`
+(git-ignored, so `omarchy plugin update` keeps it):
+
+```
+~/.config/omarchy/plugins/micull199.quicklinks/
+├── bin/quicklinks
+├── data/applications/<Name>.desktop      the real desktop entry
+└── data/icons/<slug>.png                 the icon fetched for it
+~/.local/share/applications/omarchy-quicklink-<Name>.desktop
+                                          a symlink to the entry above
+```
+
+Each quicklink is a desktop entry carrying a marker key, reached by the
+launcher through the symlink (the prefix makes the symlink unmistakably ours;
+the visible `Name=` is the plain name):
 
 ```ini
 [Desktop Entry]
 Name=Invoices
 GenericName=Quicklink
 Exec=omarchy-launch-browser "https://books.example.com/invoices"
-Icon=invoices
+Icon=/home/you/.config/omarchy/plugins/micull199.quicklinks/data/icons/invoices.png
 Type=Application
 NoDisplay=true
 X-Omarchy-Quicklink=true
@@ -175,9 +189,9 @@ X-Omarchy-Quicklink=true
 Three deliberate choices there:
 
 - **The `Exec` line calls `omarchy-launch-browser`,** an Omarchy built-in, not
-  anything owned by this plugin. So if you remove the plugin, your quicklinks
-  keep working — as menu rows until you run `menu-uninstall`, and always by id
-  (`gtk-launch Invoices.desktop`). Nothing is ever left dangling.
+  anything owned by this plugin, so launching never depends on the plugin's
+  code running. The entry stays launchable by id
+  (`gtk-launch omarchy-quicklink-Invoices`).
 - **`NoDisplay=true` keeps the entry out of the app list.** The link is reached
   through its menu row instead, which has an icon and reads "Quicklinks" rather
   than "Apps"; a second row for the same link would only be noise. Other
@@ -203,10 +217,42 @@ generated entry back to the raw URL.
 The icon never holds up the add. The entry is written instantly with the
 themed `web-browser` icon, then `fetch-icon` runs detached in the background:
 the site's own apple-touch-icon link, then `/apple-touch-icon.png`, then
-Google's favicon service as a last resort. Whatever it finds lands in
-`~/.local/share/icons/hicolor/256x256/apps/<name>.png` and `Icon=` is patched
-to point at it. If nothing can be fetched the quicklink keeps the generic icon.
-`--icon NAME` skips the fetch and uses a themed icon of your choosing.
+Google's favicon service as a last resort. Whatever it finds lands in `data/icons/<slug>.png` and `Icon=` is patched to
+that absolute path — the icon theme directories under `~/.local/share/icons`
+are never touched. If nothing can be fetched the quicklink keeps the generic
+icon. `--icon NAME` skips the fetch and uses a themed icon of your choosing.
+
+### What happens on `omarchy plugin remove`
+
+Omarchy runs no plugin hooks: `omarchy plugin remove` disables the plugin in
+`shell.json`, deletes the plugin folder and rescans. The layout above is
+designed so that this alone leaves nothing functional behind:
+
+- **Desktop entries.** The real files were in the folder, so they are gone.
+  The symlinks in `~/.local/share/applications` now dangle. Quickshell's
+  desktop-entry scanner (`src/core/desktopentry.cpp`) does
+  `if (!file.open(QFile::ReadOnly)) { qCDebug(...) << "Could not open file"; continue; }`
+  — an unreadable entry is skipped, not shown. GLib (`gtk-launch`, GNOME) and
+  `update-desktop-database` likewise cannot parse a file that does not exist,
+  so the launcher drops every quicklink at once. The test suite checks both.
+- **Icons.** Also in the folder, so gone, and nothing references them.
+- **Menu rows.** Every row's `when` guard tests for `bin/quicklinks` in the
+  plugin folder, so the whole block stops appearing. The text stays in the
+  menu file until the plugin is reinstalled (which rewrites it) or
+  `uninstall` runs; it is inert.
+
+What does remain is inert: dangling symlinks and a dormant block of JSONC. If
+you reinstall the plugin, its first load prunes any dangling
+`omarchy-quicklink-*.desktop` symlinks and rewrites the block. For a removal
+that leaves not even those, use `bin/quicklinks uninstall --remove-plugin`
+(see [Uninstall](#uninstall)).
+
+The first load after upgrading from 1.3 or earlier migrates the old layout:
+regular marked `.desktop` files in `~/.local/share/applications` move into
+`data/applications/` with a symlink left in their place, their icons move from
+`~/.local/share/icons/hicolor/256x256/apps/` into `data/icons/` with `Icon=`
+rewritten, and directories that emptied are removed. It is idempotent and runs
+from `sync` every time the panel opens.
 
 `QuicklinksPanel.qml` is the bar widget. It shells out to `bin/quicklinks`
 inside the plugin folder for everything that touches disk, so the storage rules
@@ -227,7 +273,8 @@ bin/quicklinks any                                    # exit 0 when at least one
 bin/quicklinks fetch-icon "Books" "https://books.example.com/new"
 bin/quicklinks menu-new                               # name + URL via the menu's own prompts
 bin/quicklinks pick-remove                            # pick one from the menu and delete it
-bin/quicklinks sync                                   # upgrade older entries, regenerate menu rows
+bin/quicklinks menu-uninstall-plugin                  # confirm, then uninstall --remove-plugin
+bin/quicklinks sync                                   # migrate, heal symlinks, regenerate menu rows
 bin/quicklinks export [FILE|DIR|-] [--force]          # write every quicklink to a JSON file
 bin/quicklinks import FILE [--replace]                # read one back
 bin/quicklinks menu-install
@@ -248,20 +295,24 @@ tests/run              # backend test suite
 bash -n bin/quicklinks # syntax check
 ```
 
-`tests/run` points every path the script uses (desktop entries, icons, menu
-extension, `HOME`) at a temporary directory and stubs the tools it shells out
-to (`curl`, `update-desktop-database`, `omarchy-launch-browser`, ...), so it
-never reads or writes your real config and never fetches or launches anything.
-The same overrides — `OMARCHY_QUICKLINKS_DESKTOP_DIR`,
-`OMARCHY_QUICKLINKS_ICON_DIR`, `OMARCHY_MENU_EXTENSION` — work from your own
-shell.
+`tests/run` points every path the script uses (the data dir, the launcher
+symlink dir, the legacy icon dir, the menu extension, `HOME`) at a temporary
+directory and stubs the tools it shells out to (`curl`,
+`update-desktop-database`, `omarchy-launch-browser`, `gum`, ...), so it never
+reads or writes your real config and never fetches or launches anything. The
+same overrides — `OMARCHY_QUICKLINKS_DATA_DIR`, `OMARCHY_QUICKLINKS_ICON_DIR`,
+`OMARCHY_QUICKLINKS_DESKTOP_DIR`, `OMARCHY_QUICKLINKS_LEGACY_ICON_DIR`,
+`OMARCHY_MENU_EXTENSION` — work from your own shell.
 
 ## Uninstall
 
-Omarchy runs no hooks when a plugin is removed: `omarchy plugin remove` disables
-the plugin in `shell.json`, deletes the plugin folder and rescans. So the plugin
-carries its own cleanup command, which by default deletes your quicklinks too.
-**Export first** if you may want them back:
+A bare `omarchy plugin remove micull199.quicklinks` is safe (see
+[above](#what-happens-on-omarchy-plugin-remove)): the entries and icons go with
+the folder, the symlinks dangle harmlessly and the menu rows stop showing. For
+a removal that leaves not even the inert leftovers, run the plugin's own
+cleanup — from the panel's trash-can button, from `Remove > Quicklinks plugin`
+in the menu (both ask first), or by hand. It deletes your quicklinks, so
+**export first** if you may want them back:
 
 ```bash
 Q=~/.config/omarchy/plugins/micull199.quicklinks/bin/quicklinks
@@ -270,29 +321,29 @@ $Q uninstall --remove-plugin     # remove every trace, then the plugin itself
 ```
 
 `--remove-plugin` finishes with `omarchy plugin remove micull199.quicklinks
---yes`; leave it off to run that step yourself. Pass `--keep-quicklinks` to
-leave the desktop entries and icons in place — they keep working because their
-`Exec` line calls `omarchy-launch-browser`, not the plugin.
+--yes`; leave it off to run that step yourself. `--keep-quicklinks` leaves
+`data/` and the symlinks in place, so the links stay launchable until the
+plugin folder itself is removed.
 
-Everything the plugin ever writes outside its own folder, and what `uninstall`
-does with it:
+Everything the plugin writes, and what `uninstall` does with it:
 
 | Written | Where | `uninstall` | `--keep-quicklinks` |
 | --- | --- | --- | --- |
-| One desktop entry per quicklink | `~/.local/share/applications/<Name>.desktop` | removed (only entries carrying `X-Omarchy-Quicklink=true`) | kept |
-| Fetched site icons | `~/.local/share/icons/hicolor/256x256/apps/<name>.png` | removed (only icons named after a quicklink), then empty parent directories | kept |
+| Real desktop entries and fetched icons | `<plugin>/data/` | deleted | kept |
+| Launcher symlinks `omarchy-quicklink-<Name>.desktop` | `~/.local/share/applications/` | removed (only symlinks into the plugin's data dir), then the directory if that emptied it | kept |
 | Menu rows (marker-delimited block) | `~/.config/omarchy/extensions/omarchy-menu.jsonc` | removed; the rest of the file is untouched | same |
 | The extension file itself, when none existed | same file, written as `{}` | removed, with the directory if that left it empty | same |
 | One `.bak` of the menu file, plus `.bak.<epoch>` files from 1.0 | next to the menu file | removed when it holds our rows or is the `{}` we wrote; a backup written by something else is kept | same |
+| Pre-1.4 entries and icons | `~/.local/share/applications/<Name>.desktop`, `~/.local/share/icons/hicolor/256x256/apps/` | migrated into `data/` first, then handled as above | migrated |
 | The plugin's enabled state | `~/.config/omarchy/shell.json` | handled by `omarchy plugin remove` | same |
 
-`update-desktop-database` and `gtk-update-icon-cache` are run after changes so
-the caches those tools own are rebuilt; the plugin writes nothing else. It
-never touches `~/.config/hypr/`, adds no autostart entries, systemd units or
-symlinks, and creates no directories of its own beyond the ones above.
-`uninstall` is idempotent, deletes nothing it did not create, and removes a
-directory only when it is empty. To bring an exported list back after a
-reinstall, run `bin/quicklinks import <file>`.
+`update-desktop-database` is run after changes so the cache it owns is rebuilt;
+the plugin writes nothing else. It never touches `~/.config/hypr/`, adds no
+autostart entries, systemd units or files in `~/.local/bin`, and creates no
+directories outside its folder beyond the ones above. `uninstall` is
+idempotent, deletes nothing it did not create, and removes a directory only
+when it is empty. To bring an exported list back after a reinstall, run
+`bin/quicklinks import <file>`.
 
 ## See also
 

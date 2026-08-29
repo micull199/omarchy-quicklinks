@@ -3,6 +3,55 @@
 All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 1.4.0 — 2026-08-30
+
+Removing the plugin with a bare `omarchy plugin remove` used to leave the
+quicklink desktop entries searchable and launchable, the menu rows in place and
+the icons on disk, because Omarchy runs no plugin hooks and all of that lived
+outside the plugin folder. Everything now lives inside it.
+
+### Changed
+
+- All state moved into `<plugin>/data/`: real desktop entries in
+  `data/applications/`, fetched icons in `data/icons/`. `data/` is git-ignored
+  so `omarchy plugin update` preserves it. Deleting the plugin folder deletes
+  the data.
+- `~/.local/share/applications` now holds only symlinks,
+  `omarchy-quicklink-<Name>.desktop`, pointing at the real entries (the
+  visible `Name=` is unchanged). When the plugin folder is deleted they dangle
+  and every launcher skips them — Quickshell's scanner `continue`s on a file it
+  cannot open, GLib rejects it — so no quicklink stays launchable. Entries are
+  launched by id as `omarchy-quicklink-<Name>`.
+- `Icon=` is the absolute path of the fetched file in `data/icons/` (or the
+  themed name given to `--icon`). The plugin no longer writes to
+  `~/.local/share/icons` or runs `gtk-update-icon-cache`.
+- Every menu row — the submenu, its children and each per-link row — is
+  guarded by `[ -x <plugin>/bin/quicklinks ]`, so the whole block stops
+  showing the moment the folder is gone. Per-link rows no longer depend on a
+  desktop file existing.
+- `sync` (run on every panel open) heals: it migrates pre-1.4 entries and
+  icons into `data/`, leaving symlinks in place and rewriting `Icon=`,
+  removes legacy directories it emptied, recreates missing symlinks and prunes
+  dangling `omarchy-quicklink-*` symlinks left by an earlier removal.
+- `uninstall` removes the symlinks and, unless `--keep-quicklinks`, the whole
+  `data/` directory, in addition to the menu rows and backups.
+- Paths derive from the script's real location (`readlink -f`), so a
+  symlinked plugin folder works; the test overrides remain, plus
+  `OMARCHY_QUICKLINKS_DATA_DIR` and `OMARCHY_QUICKLINKS_LEGACY_ICON_DIR`.
+
+### Added
+
+- `Remove > Quicklinks plugin` menu row, running `menu-uninstall-plugin` in a
+  floating terminal: a `gum confirm`, then `uninstall --remove-plugin`.
+- A matching trash-can button in the panel footer, with a confirmation, that
+  runs `uninstall --remove-plugin` detached.
+- Tests: symlink creation and validity, absolute icon paths, a simulated bare
+  plugin removal (dangling symlinks rejected by GLib and
+  `desktop-file-validate`, every menu guard failing), dangling-symlink pruning,
+  legacy migration and its idempotence.
+- README: "What happens on `omarchy plugin remove`" explains the design and
+  quotes the Quickshell scanner behaviour it relies on.
+
 ## 1.3.0 — 2026-08-29
 
 ### Added
