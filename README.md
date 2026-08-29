@@ -115,3 +115,7 @@ plugin's — the two features stay cleanly separated.
 [Omarchy Layouts](https://github.com/micull199/omarchy-layouts) — open a whole
 group of apps at once. The two plugins share the same menu-splice convention and
 can be installed side by side.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
