@@ -204,6 +204,26 @@ menu_current_block() {
   ' "$file"
 }
 
+# Keep exactly one backup, overwritten in place. Versions before this wrote
+# "<file>.bak.<epoch>" on every change and never cleaned them up, so sweep any
+# of those away too. Omarchy itself writes no .bak files next to this one, so
+# the pattern is unambiguously ours.
+menu_backup() {
+  cp "$1" "$1.bak"
+}
+
+# Versions before this wrote "<file>.bak.<epoch>" on every change and never
+# cleaned them up. Sweep any away whenever we run, not only when we write, so
+# an existing pile clears itself on the next shell start. Omarchy writes no
+# .bak files next to this one, so the pattern is unambiguously ours.
+menu_prune_legacy_backups() {
+  local file="$1" legacy
+  for legacy in "$file".bak.[0-9]*; do
+    [[ -e $legacy ]] && rm -f "$legacy"
+  done
+  return 0
+}
+
 menu_strip() {
   local file="$1" tmp
   [[ -f $file ]] || return 0
@@ -220,6 +240,8 @@ cmd_menu_install() {
   mkdir -p "$(dirname "$file")"
   [[ -f $file ]] || printf '{\n}\n' >"$file"
 
+  menu_prune_legacy_backups "$file"
+
   # Already correct: touch nothing, so this is safe on every shell start.
   if [[ $(menu_current_block "$file") == "$(menu_block)" ]]; then
     echo "ok"
@@ -229,7 +251,7 @@ cmd_menu_install() {
   grep -qE '^[[:space:]]*\}[[:space:]]*$' "$file" ||
     die "$file has no closing brace on a line of its own; refusing to edit it"
 
-  cp "$file" "$file.bak.$(date +%s)"
+  menu_backup "$file"
   menu_strip "$file"
 
   tmp=$(mktemp)
@@ -255,7 +277,7 @@ cmd_menu_install() {
 
 cmd_menu_uninstall() {
   [[ -f $MENU_EXTENSION ]] || { echo "ok"; return 0; }
-  cp "$MENU_EXTENSION" "$MENU_EXTENSION.bak.$(date +%s)"
+  menu_backup "$MENU_EXTENSION"
   menu_strip "$MENU_EXTENSION"
   command -v omarchy >/dev/null 2>&1 && omarchy menu refresh >/dev/null 2>&1 || true
   echo "ok"
