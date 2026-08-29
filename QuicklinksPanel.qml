@@ -240,6 +240,7 @@ Panel {
       root.errorText = ""
       linkGate.reset()
       root.reload()
+      if (!syncProc.running) syncProc.running = true
     }
   }
 
@@ -289,7 +290,23 @@ Panel {
     }
   }
 
-  Component.onCompleted: menuInstallProc.running = true
+  // Upgrades older entries to the current format and regenerates the menu
+  // rows that mirror them.
+  Process {
+    id: syncProc
+    command: [root.backend, "sync"]
+    stderr: StdioCollector { waitForEnd: true }
+    onExited: function(code, status) {
+      var message = root.stderrOf(syncProc, "")
+      if (code !== 0 && message === "") message = "quicklinks sync failed (exit " + code + ")"
+      if (message !== "") root.errorText = message
+    }
+  }
+
+  Component.onCompleted: {
+    menuInstallProc.running = true
+    syncProc.running = true
+  }
 
   Process {
     id: infoProc

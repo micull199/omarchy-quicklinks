@@ -24,14 +24,16 @@ Remove it with `omarchy plugin remove micull199.quicklinks` (run
 
 ## Three ways to reach a quicklink
 
-**App launcher (`SUPER + SPACE`)** — type the name and press Enter. Every
-quicklink is an ordinary desktop entry, exactly like an Omarchy web app, so it
-is searchable alongside your applications.
-
-**Omarchy menu** — `Quicklinks` opens the panel, `Install > Quicklink` adds one,
-`Remove > Quicklink` deletes one (after asking).
+**Omarchy menu / app launcher (`SUPER + SPACE`)** — type the name and press
+Enter. Every quicklink is a row of its own in the menu, under `Quicklinks`: it
+shows the link glyph 󰌷 (󰒃 for a private link), the name, and "Quicklinks"
+beneath it in search results — not "Apps", which is what a desktop entry would
+say. `Quicklinks > Manage quicklinks` opens the panel; `Install > Quicklink`
+adds one and `Remove > Quicklink` deletes one (after asking).
 
 **Bar icon** — click it for the searchable panel below.
+
+**Keyboard** — bind the panel directly; see below.
 
 ## Use
 
@@ -84,20 +86,24 @@ whatever the default browser calls it (`--incognito`, `--private-window`,
 ## Menu rows
 
 The Omarchy menu is driven by a single JSONC file and has no plugin API, so the
-plugin adds its rows itself: it runs `menu-install` each time it loads, which
-does nothing when the rows are already correct.
+plugin adds its rows itself: a `Quicklinks` submenu holding `Manage quicklinks`
+and one row per link, plus `Install > Quicklink` and `Remove > Quicklink`. The
+rows are regenerated whenever a link is added, edited or removed, and each time
+the panel opens (`bin/quicklinks sync`), which touches nothing when they are
+already correct.
 
 ```bash
-bin/quicklinks menu-install     # add the three rows
+bin/quicklinks menu-install     # (re)write the rows
 bin/quicklinks menu-uninstall   # take them away again
 ```
 
 It splices a marker-delimited block into
 `~/.config/omarchy/extensions/omarchy-menu.jsonc`, backing the file up first.
-Every row carries a `when` guard testing for this script, so if you remove the
-plugin without running `menu-uninstall` the rows stop appearing rather than
-erroring. `Quicklinks` and `Remove > Quicklink` additionally ask
-`bin/quicklinks any`, so they only appear once there is a quicklink to show.
+A link's row runs `omarchy-launch-browser` itself rather than calling back into
+the plugin, so the rows keep working if the plugin is removed — until
+`menu-uninstall` takes them away — and each is guarded by `[ -f <its entry> ]`,
+so a row disappears the moment its entry does. The plugin's own rows are
+guarded by `[ -x bin/quicklinks ]`.
 
 The Layouts plugin writes to the same file inside its own markers; the two
 blocks are independent and neither disturbs the other.
@@ -121,18 +127,24 @@ carrying a marker key:
 ```ini
 [Desktop Entry]
 Name=Invoices
+GenericName=Quicklink
 Exec=omarchy-launch-browser "https://books.example.com/invoices"
 Icon=invoices
 Type=Application
+NoDisplay=true
 X-Omarchy-Quicklink=true
 ```
 
-Two deliberate choices there:
+Three deliberate choices there:
 
 - **The `Exec` line calls `omarchy-launch-browser`,** an Omarchy built-in, not
   anything owned by this plugin. So if you remove the plugin, your quicklinks
-  keep working as launcher entries — you just lose the panel that manages them.
-  Nothing is ever left dangling.
+  keep working — as menu rows until you run `menu-uninstall`, and always by id
+  (`gtk-launch Invoices.desktop`). Nothing is ever left dangling.
+- **`NoDisplay=true` keeps the entry out of the app list.** The link is reached
+  through its menu row instead, which has an icon and reads "Quicklinks" rather
+  than "Apps"; a second row for the same link would only be noise. Other
+  launchers that read `~/.local/share/applications` will not list quicklinks.
 - **`X-Omarchy-Quicklink=true` is the marker,** rather than the `Exec` command.
   That keeps quicklinks and Omarchy web apps cleanly separate: neither shows up
   in the other's list.
@@ -178,6 +190,7 @@ bin/quicklinks any                                    # exit 0 when at least one
 bin/quicklinks fetch-icon "Books" "https://books.example.com/new"
 bin/quicklinks menu-new                               # name + URL via the menu's own prompts
 bin/quicklinks pick-remove                            # pick one from the menu and delete it
+bin/quicklinks sync                                   # upgrade older entries, regenerate menu rows
 bin/quicklinks menu-install
 bin/quicklinks menu-uninstall
 ```

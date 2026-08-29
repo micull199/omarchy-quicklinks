@@ -165,29 +165,48 @@ icon_of() {
 
 # --------------------------------------------------------------- the entry
 #
-# Same keys omarchy-webapp-install writes, plus our markers, so a quicklink is
-# indistinguishable from a web app to the launcher and only differs in how it
-# opens the URL.
-write_entry() {
-  local name="$1" url="$2" private="$3" icon="$4" target
-  target=$(desktop_file "$name")
-  mkdir -p "$DESKTOP_DIR"
-  {
-    cat <<DESKTOP
+# Same keys omarchy-webapp-install writes, plus our markers. NoDisplay keeps the
+# entry out of the app launcher: quicklinks appear there through their own menu
+# rows (see menu_block), which carry an icon and read "Quicklinks" underneath
+# rather than "Apps", and a second row for the same link would only be noise.
+# The entry stays launchable by id (gtk-launch, the panel's `open`), so nothing
+# depends on the rows.
+entry_content() {
+  local name="$1" url="$2" private="$3" icon="$4"
+  cat <<DESKTOP
 [Desktop Entry]
 Version=1.0
 Name=$name
+GenericName=Quicklink
 Comment=$name
 Exec=$(exec_line_for "$url" "$private")
 Terminal=false
 Type=Application
 Icon=$icon
+NoDisplay=true
 StartupNotify=true
 $MARKER
 DESKTOP
-    ((private)) && printf '%s\n' "$PRIVATE_MARKER"
-  } >"$target"
+  ((private)) && printf '%s\n' "$PRIVATE_MARKER"
+  return 0
+}
+
+# Returns 0 when the file changed, 1 when it was already correct.
+write_entry() {
+  local name="$1" url="$2" private="$3" icon="$4" target content
+  target=$(desktop_file "$name")
+  content=$(entry_content "$name" "$url" "$private" "$icon")
+  [[ -f $target && $(<"$target") == "$content" ]] && return 1
+  mkdir -p "$DESKTOP_DIR"
+  printf '%s\n' "$content" >"$target"
   chmod +x "$target"
+  return 0
+}
+
+# Menu rows mirror the entries, so every change to an entry regenerates them.
+# Errors are swallowed: a menu file we refuse to edit must not break `add`.
+refresh_menu() {
+  cmd_menu_install >/dev/null 2>&1 || true
 }
 
 update_desktop_db() {
@@ -318,8 +337,9 @@ cmd_add() {
     die "\"$name\" already exists and is not a quicklink"
   fi
 
-  write_entry "$name" "$url" "$private" "${icon:-$FALLBACK_ICON}"
+  write_entry "$name" "$url" "$private" "${icon:-$FALLBACK_ICON}" || true
   update_desktop_db
+  refresh_menu
   [[ -n $icon ]] || start_icon_fetch "$name" "$url"
   echo "ok"
 }
@@ -376,8 +396,9 @@ cmd_edit() {
     name=$new_name
   fi
 
-  write_entry "$name" "${new_url:-$url}" "$private" "$icon"
+  write_entry "$name" "${new_url:-$url}" "$private" "$icon" || true
   update_desktop_db
+  refresh_menu
   [[ -n $new_name ]] && update_icon_cache
 
   # A new host means the old icon is the wrong one.
@@ -397,6 +418,7 @@ cmd_remove() {
   rm -f "$target"
   [[ -n $safe ]] && rm -f "$ICON_DIR/$safe".*
   update_desktop_db
+  refresh_menu
   update_icon_cache
   echo "ok"
 }
@@ -412,6 +434,27 @@ cmd_open() {
   else
     setsid omarchy-launch-browser "$url" >/dev/null 2>&1 &
   fi
+  echo "ok"
+}
+
+# Bring every entry up to the current format (older versions wrote no
+# NoDisplay/GenericName) and regenerate the menu rows. The panel runs this each
+# time it opens; it touches nothing that is already correct.
+cmd_sync() {
+  local file name url icon private changed=0
+  if [[ -d $DESKTOP_DIR ]]; then
+    while IFS= read -r -d '' file; do
+      [[ -r $file ]] && is_quicklink "$file" || continue
+      name=$(basename "${file%.desktop}")
+      url=$(url_of "$file") || continue
+      icon=$(icon_of "$file")
+      private=0
+      is_private "$file" && private=1
+      write_entry "$name" "$url" "$private" "${icon:-$FALLBACK_ICON}" && changed=1
+    done < <(find "$DESKTOP_DIR" -maxdepth 1 -type f -name '*.desktop' -print0 2>/dev/null)
+  fi
+  ((changed)) && update_desktop_db
+  refresh_menu
   echo "ok"
 }
 
@@ -465,10 +508,57 @@ cmd_pick_remove() {
 # plugin goes away the rows stop appearing rather than erroring. Rows that need
 # an existing quicklink ask `any`, which is one quiet grep.
 
+json_escape() {
+  local s="$1"
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  printf '%s' "$s"
+}
+
+# Single-quote a word for the shell command a menu row runs.
+shell_squote() {
+  local q="'\\''"
+  printf "'%s'" "${1//\'/$q}"
+}
+
+# One menu row per quicklink under the Quicklinks submenu. The row's action is
+# the launch command itself, not a call back into this script, so the rows keep
+# working if the plugin is removed until menu-uninstall takes them away; the
+# `when` guard drops a row as soon as its entry is deleted. Row ids are slugs
+# of the name, made unique so two names that slug alike both survive.
+menu_link_rows() {
+  local -A used=()
+  local name url icon private slug id n glyph flag
+  while IFS=$'\t' read -r name url icon private; do
+    [[ -n $name ]] || continue
+    slug=$(safe_icon_name "$name")
+    [[ -n $slug ]] || slug=link
+    id=$slug
+    n=2
+    while [[ -n ${used[$id]+x} ]]; do id="$slug-$n"; n=$((n + 1)); done
+    used[$id]=1
+    glyph="󰌷"
+    flag=""
+    if [[ $private == true ]]; then
+      glyph="󰒃"
+      flag="--private "
+    fi
+    printf '  "quicklinks.%s": {"icon":"%s","label":"%s","description":"%s","when":"[ -f %s ]","action":"omarchy-launch-browser %s%s"},\n' \
+      "$id" "$glyph" "$(json_escape "$name")" "$(json_escape "$url")" \
+      "$(json_escape "$(shell_squote "$(desktop_file "$name")")")" \
+      "$flag" "$(json_escape "$(shell_squote "$url")")"
+  done < <(cmd_list)
+}
+
+# "quicklinks" is a submenu: searching the menu for a link's name finds its row
+# with the link glyph and "Quicklinks" underneath, where a desktop entry would
+# have shown "Apps". The panel is reachable from the submenu's first row.
 menu_block() {
   cat <<JSONC
   // >>> omarchy-quicklinks (added by: quicklinks menu-install)
-  "quicklinks": {"icon":"","label":"Quicklinks","aliases":["quicklink","links","bookmarks"],"description":"Open a saved link in the default browser","when":"[ -x '$SELF' ] && '$SELF' any","action":"omarchy-shell micull199.quicklinks toggle"},
+  "quicklinks": {"icon":"󰌷","label":"Quicklinks","aliases":["quicklink","links","bookmarks"],"description":"Saved links that open in your default browser","when":"[ -x '$SELF' ]"},
+  "quicklinks.manage": {"icon":"󰒓","label":"Manage quicklinks","description":"Search, add, edit and remove links","when":"[ -x '$SELF' ]","action":"omarchy-shell micull199.quicklinks toggle"},
+$(menu_link_rows)
   "install.quicklink": {"icon":"󰉉","label":"Quicklink","description":"A named URL that opens in your default browser","when":"[ -x '$SELF' ]","action":"'$SELF' menu-new"},
   "remove.quicklink": {"icon":"󰭌","label":"Quicklink","when":"[ -x '$SELF' ] && '$SELF' any","action":"'$SELF' pick-remove"},
   // <<< omarchy-quicklinks
@@ -588,9 +678,10 @@ fetch-icon)
   shift
   cmd_fetch_icon "$@"
   ;;
+sync) cmd_sync ;;
 menu-new) cmd_menu_new ;;
 pick-remove) cmd_pick_remove ;;
 menu-install) cmd_menu_install ;;
 menu-uninstall) cmd_menu_uninstall ;;
-*) die "usage: quicklinks <list|any|add|edit|info|remove|open|fetch-icon|menu-new|pick-remove|menu-install|menu-uninstall> [args]" ;;
+*) die "usage: quicklinks <list|any|add|edit|info|remove|open|sync|fetch-icon|menu-new|pick-remove|menu-install|menu-uninstall> [args]" ;;
 esac

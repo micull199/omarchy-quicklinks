@@ -3,6 +3,24 @@
 All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 1.2.0 — 2026-08-29
+
+### Changed
+
+- Quicklinks now appear in the Omarchy menu as their own rows under a
+  `Quicklinks` submenu, with the link glyph (a lock for private links) and
+  "Quicklinks" shown beneath them in search results instead of "Apps". Each row
+  launches the URL directly, so it keeps working without the plugin. Desktop
+  entries are written with `NoDisplay=true` so the launcher does not show the
+  same link twice; they remain launchable by id.
+- The top-level `Quicklinks` menu row is now a submenu; the panel is opened from
+  `Quicklinks > Manage quicklinks`.
+
+### Added
+
+- `sync`: upgrades entries written by older versions and regenerates the menu
+  rows. The panel runs it on open.
+
 ## 1.1.0 — 2026-08-29
 
 ### Fixed

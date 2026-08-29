@@ -319,6 +319,23 @@ cp "$OMARCHY_MENU_EXTENSION" "$T/menu.orig"
 touch "$OMARCHY_MENU_EXTENSION.bak.1700000000"
 assert_eq "menu-install ok" "ok" "$(L menu-install)"
 assert_contains "menu rows added" '"remove.quicklink"' "$(cat "$OMARCHY_MENU_EXTENSION")"
+menu_now=$(cat "$OMARCHY_MENU_EXTENSION")
+assert_contains "quicklinks is a submenu (no action)" '"quicklinks": {"icon":"󰌷","label":"Quicklinks"' "$menu_now"
+assert_not_contains "submenu row carries no action" '"label":"Quicklinks","aliases":["quicklink","links","bookmarks"],"description":"Saved links that open in your default browser","when":"[ -x '"'"'$LAYOUTS'"'"' ]","action"' "$menu_now"
+assert_contains "manage row opens the panel" '"quicklinks.manage": {"icon":"󰒓","label":"Manage quicklinks"' "$menu_now"
+assert_contains "one row per link, launch inlined" '"quicklinks.trimmed": {"icon":"󰌷","label":"Trimmed","description":"https://t.example","when":"[ -f '"'"''"$OMARCHY_QUICKLINKS_DESKTOP_DIR"'/Trimmed.desktop'"'"' ]","action":"omarchy-launch-browser '"'"'https://t.example'"'"'"}' "$menu_now"
+# Our block must be valid JSON on its own: rows between the markers, comments
+# dropped, trailing comma tolerated as Omarchy's JSONC reader does.
+menu_json_ok() {
+  python3 - "$1" <<'PY'
+import sys, re, json
+raw = open(sys.argv[1]).read()
+block = raw.split("// >>> omarchy-quicklinks", 1)[1].split("\n", 1)[1].split("// <<< omarchy-quicklinks", 1)[0]
+block = re.sub(r'^\s*//.*$', '', block, flags=re.M).strip().rstrip(',')
+json.loads('{' + block + '}')
+PY
+}
+assert_ok "menu block is valid JSON" menu_json_ok "$OMARCHY_MENU_EXTENSION"
 assert_contains "guard uses any" "'$Q' any" "$(cat "$OMARCHY_MENU_EXTENSION")"
 assert_not_contains "guard no longer greps applications" "grep" "$(cat "$OMARCHY_MENU_EXTENSION")"
 assert_contains "existing rows kept" '"custom"' "$(cat "$OMARCHY_MENU_EXTENSION")"
@@ -326,6 +343,28 @@ cp "$OMARCHY_MENU_EXTENSION" "$T/menu.once"
 assert_eq "menu-install again ok" "ok" "$(L menu-install)"
 assert_ok "menu-install idempotent" cmp -s "$T/menu.once" "$OMARCHY_MENU_EXTENSION"
 assert_eq "single .bak, legacy pruned" "1" "$(ls "$(dirname "$OMARCHY_MENU_EXTENSION")" | grep -c '\.bak')"
+# Rows follow the entries: add/edit/remove regenerate them.
+L add "Menu Link" https://menu.example --private --icon web-browser >/dev/null
+assert_contains "add regenerates rows with private glyph and flag" '"quicklinks.menu-link": {"icon":"󰒃","label":"Menu Link","description":"https://menu.example","when":"[ -f '"'"''"$OMARCHY_QUICKLINKS_DESKTOP_DIR"'/Menu Link.desktop'"'"' ]","action":"omarchy-launch-browser --private '"'"'https://menu.example'"'"'"}' "$(cat "$OMARCHY_MENU_EXTENSION")"
+L add "menu link" https://other.example --icon web-browser >/dev/null
+assert_contains "slug collisions stay unique" '"quicklinks.menu-link-2": {"icon":"󰌷","label":"menu link"' "$(cat "$OMARCHY_MENU_EXTENSION")"
+L remove "menu link" >/dev/null
+assert_not_contains "remove drops the row" 'quicklinks.menu-link-2' "$(cat "$OMARCHY_MENU_EXTENSION")"
+L edit "Menu Link" --name "Renamed Link" >/dev/null
+assert_contains "edit renames the row" '"quicklinks.renamed-link"' "$(cat "$OMARCHY_MENU_EXTENSION")"
+assert_not_contains "edit drops the old row" '"quicklinks.menu-link"' "$(cat "$OMARCHY_MENU_EXTENSION")"
+assert_ok "menu block still valid JSON after churn" menu_json_ok "$OMARCHY_MENU_EXTENSION"
+assert_contains "entries are NoDisplay" "NoDisplay=true" "$(cat "$(entry "Renamed Link")")"
+assert_contains "entries carry GenericName" "GenericName=Quicklink" "$(cat "$(entry "Renamed Link")")"
+# sync upgrades an entry written by an older version and mirrors it in the menu.
+printf '[Desktop Entry]\nName=Legacy2\nExec=omarchy-launch-browser "https://legacy2.example"\nType=Application\nIcon=web-browser\nX-Omarchy-Quicklink=true\n' >"$(entry Legacy2)"
+assert_eq "sync ok" "ok" "$(L sync)"
+assert_contains "sync adds NoDisplay to legacy entry" "NoDisplay=true" "$(cat "$(entry Legacy2)")"
+assert_eq "sync keeps legacy URL" "https://legacy2.example" "$(L info Legacy2 | grep '^url' | cut -f2)"
+assert_contains "sync mirrors legacy entry in menu" '"quicklinks.legacy2"' "$(cat "$OMARCHY_MENU_EXTENSION")"
+cp "$OMARCHY_MENU_EXTENSION" "$T/menu.synced"
+L sync >/dev/null
+assert_ok "sync is idempotent" cmp -s "$T/menu.synced" "$OMARCHY_MENU_EXTENSION"
 assert_eq "menu-uninstall ok" "ok" "$(L menu-uninstall)"
 assert_ok "menu-uninstall restores original" cmp -s "$T/menu.orig" "$OMARCHY_MENU_EXTENSION"
 assert_eq "still a single .bak after uninstall" "1" "$(ls "$(dirname "$OMARCHY_MENU_EXTENSION")" | grep -c '\.bak')"
