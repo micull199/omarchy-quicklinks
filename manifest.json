@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "micull199.quicklinks",
   "name": "Quicklinks",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Michael Cullen",
   "license": "MIT",
   "description": "Named URLs that open in your default browser, searchable from the bar.",

@@ -12,11 +12,12 @@
 
 set -euo pipefail
 
-DESKTOP_DIR="$HOME/.local/share/applications"
+DESKTOP_DIR="${OMARCHY_QUICKLINKS_DESKTOP_DIR:-$HOME/.local/share/applications}"
+ICON_DIR="${OMARCHY_QUICKLINKS_ICON_DIR:-$HOME/.local/share/icons/hicolor/256x256/apps}"
 MENU_EXTENSION="${OMARCHY_MENU_EXTENSION:-$HOME/.config/omarchy/extensions/omarchy-menu.jsonc}"
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
-ICON_DIR="$HOME/.local/share/icons/hicolor/256x256/apps"
 MARKER="X-Omarchy-Quicklink=true"
+PRIVATE_MARKER="X-Omarchy-Quicklink-Private=true"
 FALLBACK_ICON="web-browser"
 
 die() {
@@ -28,7 +29,38 @@ is_quicklink() {
   [[ -f $1 ]] && grep -qxF "$MARKER" "$1" 2>/dev/null
 }
 
+is_private() {
+  grep -qxF "$PRIVATE_MARKER" "$1" 2>/dev/null
+}
+
 desktop_file() { printf '%s\n' "$DESKTOP_DIR/$1.desktop"; }
+
+# Prints the trimmed name on success, so callers use `name=$(validate_name
+# "$raw")` and always work with the trimmed form. Control characters (tab,
+# newline, CR, ...) are rejected because they cannot survive the desktop entry.
+validate_name() {
+  local name="$1"
+  name=${name#"${name%%[![:space:]]*}"}
+  name=${name%"${name##*[![:space:]]}"}
+  [[ -n $name ]] || die "a name is required"
+  [[ $name != *[[:cntrl:]]* ]] || die "a name cannot contain control characters"
+  [[ $name != */* ]] || die "a name cannot contain \"/\""
+  [[ $name != .* ]] || die "a name cannot start with a dot"
+  printf '%s\n' "$name"
+}
+
+# Prints the normalized URL: a bare host gets https:// in front, as
+# omarchy-webapp-install does. Spaces are fine because the Exec line quotes the
+# URL; control characters are not, since they cannot survive the desktop entry.
+validate_url() {
+  local url="$1"
+  url=${url#"${url%%[![:space:]]*}"}
+  url=${url%"${url##*[![:space:]]}"}
+  [[ -n $url ]] || die "a URL is required"
+  [[ $url != *[[:cntrl:]]* ]] || die "a URL cannot contain control characters"
+  [[ $url =~ ^[a-zA-Z][a-zA-Z0-9+.-]*: ]] || url="https://$url"
+  printf '%s\n' "$url"
+}
 
 safe_icon_name() {
   printf '%s\n' "$1" |
@@ -36,101 +68,350 @@ safe_icon_name() {
     sed 's/[^[:alnum:]]\+/-/g; s/^-//; s/-$//'
 }
 
-escape_exec() {
+url_host() {
   local url="$1"
-  url=${url//\\/\\\\}
-  url=${url//\"/\\\"}
-  url=${url//%/%%}
-  printf '"%s"' "$url"
-}
-
-unescape_exec() {
-  local url="$1"
-  [[ $url == \"*\" ]] && url=${url:1:${#url}-2}
-  url=${url//%%/%}
-  url=${url//\\\"/\"}
-  url=${url//\\\\/\\}
+  url=${url#*://}
+  url=${url%%[/?#]*}
+  url=${url##*@}
   printf '%s\n' "$url"
 }
 
-normalize_url() {
-  local url="$1"
-  [[ -n $url ]] || return 1
-  [[ $url =~ ^[a-zA-Z][a-zA-Z0-9+.-]*: ]] || url="https://$url"
-  printf '%s\n' "$url"
+# ------------------------------------------------------------- Exec quoting
+#
+# Quoting in an Exec key has two layers. The Exec layer allows \" \` \$ \\
+# inside a double-quoted argument and wants a literal % written as %%. The
+# desktop-file string layer underneath knows only \s \n \t \r \\, so any
+# backslash meant for the Exec layer is written doubled. A URL holding a `"`
+# therefore ends up as \\" in the file. Both GLib and desktop-file-validate
+# read it back as the raw URL; anything less exact is rejected or mangled.
+
+# Exec layer: one double-quoted argument.
+exec_quote() {
+  local s="$1"
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//\`/\\\`}
+  s=${s//\$/\\\$}
+  s=${s//%/%%}
+  printf '"%s"' "$s"
+}
+
+# Desktop-file string layer: every backslash doubled.
+file_encode() { printf '%s' "${1//\\/\\\\}"; }
+
+exec_line_for() {
+  local url="$1" private="$2" flag=""
+  ((private)) && flag="--private "
+  printf 'omarchy-launch-browser %s%s\n' "$flag" "$(file_encode "$(exec_quote "$url")")"
+}
+
+# Reverse of file_encode. An escape the string layer does not define is kept
+# as written, which is exactly what makes entries from the previous version of
+# this plugin (single-layer \" and \\) still decode below.
+file_decode() {
+  local s="$1" out="" i=0 c n
+  while ((i < ${#s})); do
+    c=${s:i:1}
+    if [[ $c == '\' ]] && ((i + 1 < ${#s})); then
+      n=${s:i+1:1}
+      case $n in
+      s) out+=' ' ;;
+      n) out+=$'\n' ;;
+      t) out+=$'\t' ;;
+      r) out+=$'\r' ;;
+      '\') out+='\' ;;
+      *) out+='\' ; i=$((i - 1)) ;;
+      esac
+      i=$((i + 2))
+    else
+      out+=$c
+      i=$((i + 1))
+    fi
+  done
+  printf '%s' "$out"
+}
+
+# Reverse of exec_quote: strip the quotes, drop the escaping backslashes,
+# collapse %%.
+exec_unquote() {
+  local s="$1" out="" i=0 c
+  [[ $s == \"*\" ]] && s=${s:1:${#s}-2}
+  while ((i < ${#s})); do
+    c=${s:i:1}
+    if [[ $c == '\' ]] && ((i + 1 < ${#s})); then
+      out+=${s:i+1:1}
+      i=$((i + 2))
+    elif [[ $c == '%' && ${s:i+1:1} == '%' ]]; then
+      out+='%'
+      i=$((i + 2))
+    else
+      out+=$c
+      i=$((i + 1))
+    fi
+  done
+  printf '%s\n' "$out"
 }
 
 url_of() {
   local file="$1" raw
-  raw=$(sed -n 's|^Exec=omarchy-launch-browser[[:space:]]*||p' "$file" | head -1)
+  raw=$(sed -n 's|^Exec=omarchy-launch-browser[[:space:]]*\(--private[[:space:]]*\)\{0,1\}||p' "$file" | head -1)
   [[ -n $raw ]] || return 1
-  unescape_exec "$raw"
+  exec_unquote "$(file_decode "$raw")"
 }
 
 icon_of() {
   sed -n 's/^Icon=//p' "$1" | head -1
 }
 
-# Tab-separated "name<TAB>url<TAB>icon", sorted by name. Panel.qml parses this.
+# --------------------------------------------------------------- the entry
+#
+# Same keys omarchy-webapp-install writes, plus our markers, so a quicklink is
+# indistinguishable from a web app to the launcher and only differs in how it
+# opens the URL.
+write_entry() {
+  local name="$1" url="$2" private="$3" icon="$4" target
+  target=$(desktop_file "$name")
+  mkdir -p "$DESKTOP_DIR"
+  {
+    cat <<DESKTOP
+[Desktop Entry]
+Version=1.0
+Name=$name
+Comment=$name
+Exec=$(exec_line_for "$url" "$private")
+Terminal=false
+Type=Application
+Icon=$icon
+StartupNotify=true
+$MARKER
+DESKTOP
+    ((private)) && printf '%s\n' "$PRIVATE_MARKER"
+  } >"$target"
+  chmod +x "$target"
+}
+
+update_desktop_db() {
+  update-desktop-database "$DESKTOP_DIR" &>/dev/null || true
+}
+
+update_icon_cache() {
+  gtk-update-icon-cache "$HOME/.local/share/icons/hicolor" &>/dev/null || true
+}
+
+# The icon fetch talks to the network, so it never runs in the caller's path:
+# the entry is written with a fallback icon first and this is started detached.
+start_icon_fetch() {
+  setsid "$SELF" fetch-icon "$1" "$2" >/dev/null 2>&1 &
+}
+
+# ------------------------------------------------------------- icon fetch
+#
+# Same chain as omarchy-webapp-install: the site's own apple-touch-icon link,
+# then the well-known path, then Google's favicon service as a last resort.
+download_icon() {
+  curl -fsSL --max-time 10 -o "$2" "$1" 2>/dev/null &&
+    [[ -s $2 && $(file -b --mime-type "$2") == image/* ]]
+}
+
+fetch_site_icon() {
+  local site_url="$1" dest="$2"
+  local origin page icon_url
+  origin=$(sed -E 's|^(https?://[^/]+).*|\1|' <<<"$site_url")
+
+  page=$(curl -fsSL --max-time 5 "$site_url" 2>/dev/null | head -c 100000 | tr '\n' ' ') || true
+  icon_url=$(grep -oiE "<link[^>]*rel=[\"'][^\"']*apple-touch-icon[^\"']*[\"'][^>]*>" <<<"$page" |
+    grep -oiE "href=[\"'][^\"']+" | head -1 | sed -E "s/^href=[\"']//") || true
+
+  case $icon_url in
+  http://* | https://*) ;;
+  //*) icon_url="https:$icon_url" ;;
+  /*) icon_url="$origin$icon_url" ;;
+  ?*) icon_url="$origin/$icon_url" ;;
+  esac
+
+  { [[ -n $icon_url ]] && download_icon "$icon_url" "$dest"; } ||
+    download_icon "$origin/apple-touch-icon.png" "$dest" ||
+    download_icon "https://www.google.com/s2/favicons?domain=${site_url}&sz=256" "$dest"
+}
+
+# Runs detached from `add` and `edit`. Nothing here may fail loudly: a missing
+# icon is cosmetic and the entry already works with the fallback.
+cmd_fetch_icon() {
+  local name="${1:-}" url="${2:-}" target safe tmp
+  [[ -n $name && -n $url ]] || exit 0
+  target=$(desktop_file "$name")
+  safe=$(safe_icon_name "$name")
+  [[ -n $safe ]] || exit 0
+
+  mkdir -p "$ICON_DIR"
+  tmp=$(mktemp "$ICON_DIR/.$safe.XXXXXX")
+  if fetch_site_icon "$url" "$tmp"; then
+    mv -f "$tmp" "$ICON_DIR/$safe.png"
+    update_icon_cache
+    # The entry may have been removed or renamed while we were fetching.
+    if is_quicklink "$target"; then
+      sed -i "s|^Icon=.*|Icon=$safe|" "$target"
+      update_desktop_db
+    fi
+  else
+    rm -f "$tmp"
+  fi
+  exit 0
+}
+
+# ---------------------------------------------------------------- commands
+
+# Tab-separated "name<TAB>url<TAB>icon<TAB>private", sorted by name. Panel.qml
+# parses this.
 cmd_list() {
   [[ -d $DESKTOP_DIR ]] || return 0
-  local file name url icon
+  local file name url icon private
   while IFS= read -r -d '' file; do
+    [[ -r $file ]] || continue
     is_quicklink "$file" || continue
     name=$(basename "${file%.desktop}")
     url=$(url_of "$file") || continue
     icon=$(icon_of "$file")
-    printf '%s\t%s\t%s\n' "$name" "$url" "$icon"
+    private=false
+    is_private "$file" && private=true
+    printf '%s\t%s\t%s\t%s\n' "$name" "$url" "$icon" "$private"
   done < <(find "$DESKTOP_DIR" -maxdepth 1 -type f -name '*.desktop' -print0 2>/dev/null) | sort -f
 }
 
-cmd_add() {
-  local name="${1:-}" url="${2:-}" icon="${3:-}" target exec_cmd
+cmd_info() {
+  local name="${1:-}" target url private=false
+  name=$(validate_name "$name")
+  target=$(desktop_file "$name")
+  is_quicklink "$target" || die "no such quicklink: $name"
+  url=$(url_of "$target") || die "could not read the URL for $name"
+  is_private "$target" && private=true
+  printf 'url\t%s\nicon\t%s\nprivate\t%s\n' "$url" "$(icon_of "$target")" "$private"
+}
 
-  [[ -n $name ]] || die "a name is required"
-  [[ $name != */* ]] || die "a name cannot contain \"/\""
-  [[ $name != .* ]] || die "a name cannot start with a dot"
-  url=$(normalize_url "$url") || die "a URL is required"
+# Exits 0 when at least one quicklink exists. Cheap enough for a menu `when`
+# guard, which runs every time the menu opens.
+cmd_any() {
+  grep -qsxF "$MARKER" "$DESKTOP_DIR"/*.desktop 2>/dev/null
+}
+
+# `add <name> <url> [--private] [--icon NAME]`; flags may appear anywhere.
+cmd_add() {
+  local name="" url="" icon="" private=0 target
+  local positional=()
+  while (($#)); do
+    case $1 in
+    --private) private=1 ;;
+    --icon)
+      shift
+      icon="${1:-}"
+      ;;
+    *) positional+=("$1") ;;
+    esac
+    shift
+  done
+  name=$(validate_name "${positional[0]:-}")
+  url=$(validate_url "${positional[1]:-}")
 
   target=$(desktop_file "$name")
-  if [[ -e $target ]] && ! is_quicklink "$target"; then
+  if [[ -e $target ]]; then
+    is_quicklink "$target" && die "a quicklink named \"$name\" already exists"
     die "\"$name\" already exists and is not a quicklink"
   fi
 
-  exec_cmd="omarchy-launch-browser $(escape_exec "$url")"
+  write_entry "$name" "$url" "$private" "${icon:-$FALLBACK_ICON}"
+  update_desktop_db
+  [[ -n $icon ]] || start_icon_fetch "$name" "$url"
+  echo "ok"
+}
 
-  # Delegate to Omarchy's own installer for icon fetching and the .desktop
-  # format; argument 4 overrides the Exec line, an empty argument 3 triggers
-  # the icon auto-fetch chain.
-  if ! omarchy-webapp-install "$name" "$url" "$icon" "$exec_cmd" >/dev/null 2>&1; then
-    omarchy-webapp-install "$name" "$url" "$FALLBACK_ICON" "$exec_cmd" >/dev/null ||
-      die "could not create \"$name\""
+# `edit <name> [--name NEW] [--url URL] [--private|--no-private]`.
+cmd_edit() {
+  local name="${1:-}" new_name="" new_url="" private_flag="" target
+  local url icon private=0 old_safe new_safe new_target
+  shift || true
+  name=$(validate_name "$name")
+  while (($#)); do
+    case $1 in
+    --name)
+      shift
+      new_name="${1:-}"
+      ;;
+    --url)
+      shift
+      new_url="${1:-}"
+      ;;
+    --private) private_flag=1 ;;
+    --no-private) private_flag=0 ;;
+    *) die "unknown option: $1" ;;
+    esac
+    shift
+  done
+
+  target=$(desktop_file "$name")
+  is_quicklink "$target" || die "no such quicklink: $name"
+  url=$(url_of "$target") || die "could not read the URL for $name"
+  icon=$(icon_of "$target")
+  is_private "$target" && private=1
+  [[ -n $private_flag ]] && private=$private_flag
+
+  [[ -n $new_name ]] && new_name=$(validate_name "$new_name")
+  [[ -n $new_url ]] && new_url=$(validate_url "$new_url")
+  [[ -n $new_name && $new_name != "$name" ]] || new_name=""
+
+  if [[ -n $new_name ]]; then
+    new_target=$(desktop_file "$new_name")
+    if [[ -e $new_target ]]; then
+      is_quicklink "$new_target" && die "a quicklink named \"$new_name\" already exists"
+      die "\"$new_name\" already exists and is not a quicklink"
+    fi
+    old_safe=$(safe_icon_name "$name")
+    new_safe=$(safe_icon_name "$new_name")
+    # The icon file is named after the entry, so it follows the rename; the
+    # Icon= value follows only when it pointed at that file.
+    if [[ -n $old_safe && -n $new_safe && $old_safe != "$new_safe" && -f $ICON_DIR/$old_safe.png ]]; then
+      mv -f "$ICON_DIR/$old_safe.png" "$ICON_DIR/$new_safe.png"
+      [[ $icon == "$old_safe" ]] && icon=$new_safe
+    fi
+    rm -f "$target"
+    name=$new_name
   fi
 
-  grep -qxF "$MARKER" "$target" 2>/dev/null || printf '%s\n' "$MARKER" >>"$target"
-  update-desktop-database "$DESKTOP_DIR" &>/dev/null || true
+  write_entry "$name" "${new_url:-$url}" "$private" "$icon"
+  update_desktop_db
+  [[ -n $new_name ]] && update_icon_cache
+
+  # A new host means the old icon is the wrong one.
+  if [[ -n $new_url && $(url_host "$new_url") != "$(url_host "$url")" ]]; then
+    start_icon_fetch "$name" "$new_url"
+  fi
   echo "ok"
 }
 
 cmd_remove() {
-  local name="${1:-}" target icon
-  [[ -n $name ]] || die "a name is required"
+  local name="${1:-}" target safe
+  name=$(validate_name "$name")
   target=$(desktop_file "$name")
   is_quicklink "$target" || die "no such quicklink: $name"
 
-  icon=$(safe_icon_name "$name")
-  rm -f "$target" "$ICON_DIR/$icon.png" "$ICON_DIR/$name.png"
-  update-desktop-database "$DESKTOP_DIR" &>/dev/null || true
+  safe=$(safe_icon_name "$name")
+  rm -f "$target"
+  [[ -n $safe ]] && rm -f "$ICON_DIR/$safe".*
+  update_desktop_db
+  update_icon_cache
   echo "ok"
 }
 
 cmd_open() {
   local name="${1:-}" target url
-  [[ -n $name ]] || die "a name is required"
+  name=$(validate_name "$name")
   target=$(desktop_file "$name")
   is_quicklink "$target" || die "no such quicklink: $name"
   url=$(url_of "$target") || die "could not read the URL for $name"
-  setsid omarchy-launch-browser "$url" >/dev/null 2>&1 &
+  if is_private "$target"; then
+    setsid omarchy-launch-browser --private "$url" >/dev/null 2>&1 &
+  else
+    setsid omarchy-launch-browser "$url" >/dev/null 2>&1 &
+  fi
   echo "ok"
 }
 
@@ -138,8 +419,7 @@ cmd_open() {
 #
 # A quicklink needs only a name and a URL, so the menu can collect both itself
 # with omarchy-menu-input. That keeps this path free of any dependency on the
-# panel or on custom IPC, which the reload burst during `omarchy plugin add`
-# can leave unregistered.
+# panel or on custom IPC.
 cmd_menu_new() {
   local name url
   name=$(omarchy-menu-input "Quicklink name") || exit 0
@@ -160,7 +440,7 @@ cmd_menu_new() {
 
 # Pick a quicklink from the menu and delete it, mirroring omarchy-webapp-remove.
 cmd_pick_remove() {
-  local names=() name sel answer
+  local names=() sel answer
   mapfile -t names < <(cmd_list | cut -f1)
 
   if ((${#names[@]} == 0)); then
@@ -182,14 +462,15 @@ cmd_pick_remove() {
 #
 # The Omarchy menu is one JSONC file with no plugin API, so the plugin adds its
 # own rows. Every row carries a `when` guard testing for this script, so if the
-# plugin goes away the rows stop appearing rather than erroring.
+# plugin goes away the rows stop appearing rather than erroring. Rows that need
+# an existing quicklink ask `any`, which is one quiet grep.
 
 menu_block() {
   cat <<JSONC
   // >>> omarchy-quicklinks (added by: quicklinks menu-install)
-  "quicklinks": {"icon":"","label":"Quicklinks","aliases":["quicklink","links","bookmarks"],"description":"Open a saved link in the default browser","when":"[ -x '$SELF' ] && grep -qsl 'X-Omarchy-Quicklink=true' \$HOME/.local/share/applications/*.desktop","action":"omarchy-shell micull199.quicklinks toggle"},
+  "quicklinks": {"icon":"","label":"Quicklinks","aliases":["quicklink","links","bookmarks"],"description":"Open a saved link in the default browser","when":"[ -x '$SELF' ] && '$SELF' any","action":"omarchy-shell micull199.quicklinks toggle"},
   "install.quicklink": {"icon":"󰉉","label":"Quicklink","description":"A named URL that opens in your default browser","when":"[ -x '$SELF' ]","action":"'$SELF' menu-new"},
-  "remove.quicklink": {"icon":"󰭌","label":"Quicklink","when":"[ -x '$SELF' ] && grep -qsl 'X-Omarchy-Quicklink=true' \$HOME/.local/share/applications/*.desktop","action":"'$SELF' pick-remove"},
+  "remove.quicklink": {"icon":"󰭌","label":"Quicklink","when":"[ -x '$SELF' ] && '$SELF' any","action":"'$SELF' pick-remove"},
   // <<< omarchy-quicklinks
 JSONC
 }
@@ -204,10 +485,7 @@ menu_current_block() {
   ' "$file"
 }
 
-# Keep exactly one backup, overwritten in place. Versions before this wrote
-# "<file>.bak.<epoch>" on every change and never cleaned them up, so sweep any
-# of those away too. Omarchy itself writes no .bak files next to this one, so
-# the pattern is unambiguously ours.
+# Keep exactly one backup, overwritten in place.
 menu_backup() {
   cp "$1" "$1.bak"
 }
@@ -285,9 +563,18 @@ cmd_menu_uninstall() {
 
 case "${1:-list}" in
 list) cmd_list ;;
+any) cmd_any ;;
 add)
   shift
   cmd_add "$@"
+  ;;
+edit)
+  shift
+  cmd_edit "$@"
+  ;;
+info)
+  shift
+  cmd_info "$@"
   ;;
 remove)
   shift
@@ -297,9 +584,13 @@ open)
   shift
   cmd_open "$@"
   ;;
+fetch-icon)
+  shift
+  cmd_fetch_icon "$@"
+  ;;
 menu-new) cmd_menu_new ;;
 pick-remove) cmd_pick_remove ;;
 menu-install) cmd_menu_install ;;
 menu-uninstall) cmd_menu_uninstall ;;
-*) die "usage: quicklinks <list|add|remove|open|menu-new|pick-remove|menu-install|menu-uninstall> [args]" ;;
+*) die "usage: quicklinks <list|any|add|edit|info|remove|open|fetch-icon|menu-new|pick-remove|menu-install|menu-uninstall> [args]" ;;
 esac
