@@ -19,8 +19,8 @@ Omarchy asks which bar section to put the icon in. The menu rows install
 themselves the first time the plugin loads. If they don't appear, run
 `omarchy restart shell`.
 
-Remove it with `omarchy plugin remove micull199.quicklinks` (run
-`bin/quicklinks menu-uninstall` first for a spotless removal).
+Remove it with `bin/quicklinks uninstall` followed by
+`omarchy plugin remove micull199.quicklinks`; see [Uninstall](#uninstall).
 
 ## Three ways to reach a quicklink
 
@@ -47,6 +47,7 @@ Click the bar icon. The panel opens with the search box focused:
 | `Ctrl+N` | New quicklink (opens the builder) |
 | `Ctrl+E` | Edit the highlighted link |
 | `Ctrl+C` | Copy the highlighted link's URL to the clipboard |
+| `Ctrl+S` | Export every quicklink to a JSON file (see below) |
 | `Del` | Delete the highlighted link, after a confirmation |
 | `Esc` | Close |
 
@@ -82,6 +83,42 @@ entry carries a second marker, `X-Omarchy-Quicklink-Private=true`, and its
 `Exec` passes `--private` to `omarchy-launch-browser`, which maps that to
 whatever the default browser calls it (`--incognito`, `--private-window`,
 `--inprivate`). Panel rows show these links with a lock glyph.
+
+### Export and import
+
+The footer's export button, or `Ctrl+S`, writes every quicklink to
+`~/Downloads/omarchy-quicklinks-<date>.json` (or `~` when there is no Downloads
+folder) and shows the path in the panel. From a shell you can pick the file:
+
+```bash
+bin/quicklinks export                      # ~/Downloads/omarchy-quicklinks-2026-08-29.json
+bin/quicklinks export ~/backups/links.json # a path of your own; refuses to overwrite
+bin/quicklinks export ~/backups/           # a directory: the default name inside it
+bin/quicklinks export --force              # overwrite an existing file
+bin/quicklinks export -                    # to stdout
+bin/quicklinks import links.json           # add what is missing, skip existing names
+bin/quicklinks import links.json --replace # overwrite existing quicklinks of the same name
+```
+
+The file is plain JSON, made to be read by hand or by other tools:
+
+```json
+{
+  "format": "omarchy-quicklinks",
+  "version": 1,
+  "exported": "2026-08-29T13:00:00Z",
+  "quicklinks": [
+    { "name": "Invoices", "url": "https://books.example.com/invoices", "private": false },
+    { "name": "Wiki", "url": "https://wiki.example.com", "private": false, "icon": "help-browser" }
+  ]
+}
+```
+
+`icon` is only present when you chose a themed icon with `--icon`; icons the
+plugin fetched from the site are not exported, and `import` fetches them again.
+`import` also accepts a bare JSON array of `{name, url, private?, icon?}`
+objects, validates each row the way `add` does, and prints
+`imported N skipped M`. Both commands need `jq`, which Omarchy ships.
 
 ## Menu rows
 
@@ -191,8 +228,11 @@ bin/quicklinks fetch-icon "Books" "https://books.example.com/new"
 bin/quicklinks menu-new                               # name + URL via the menu's own prompts
 bin/quicklinks pick-remove                            # pick one from the menu and delete it
 bin/quicklinks sync                                   # upgrade older entries, regenerate menu rows
+bin/quicklinks export [FILE|DIR|-] [--force]          # write every quicklink to a JSON file
+bin/quicklinks import FILE [--replace]                # read one back
 bin/quicklinks menu-install
 bin/quicklinks menu-uninstall
+bin/quicklinks uninstall [--purge]                    # remove every trace outside the plugin folder
 ```
 
 `edit` takes any combination of `--name`, `--url`, `--private` and
@@ -218,9 +258,35 @@ shell.
 
 ## Uninstall
 
-`omarchy plugin remove micull199.quicklinks` deletes the plugin folder and its
-`shell.json` entry. Your quicklinks stay — they're your data, and they still
-work. Delete them from the panel first if you want them gone.
+Omarchy runs no hooks when a plugin is removed: `omarchy plugin remove` disables
+the plugin in `shell.json`, deletes the plugin folder and rescans. So the plugin
+carries its own cleanup command. Run it first, then remove the plugin:
+
+```bash
+~/.config/omarchy/plugins/micull199.quicklinks/bin/quicklinks uninstall
+omarchy plugin remove micull199.quicklinks
+```
+
+Everything the plugin ever writes outside its own folder, and what `uninstall`
+does with it:
+
+| Written | Where | `uninstall` | `uninstall --purge` |
+| --- | --- | --- | --- |
+| Menu rows (marker-delimited block) | `~/.config/omarchy/extensions/omarchy-menu.jsonc` | removed; the rest of the file is untouched | same |
+| The extension file itself, when none existed | same file, written as `{}` | removed, with the directory if that left it empty | same |
+| One `.bak` of the menu file, plus `.bak.<epoch>` files from 1.0 | next to the menu file | removed when it holds our rows or is the `{}` we wrote; a backup written by something else is kept | same |
+| One desktop entry per quicklink | `~/.local/share/applications/<Name>.desktop` | kept — your data, and still launches | removed (only entries carrying `X-Omarchy-Quicklink=true`) |
+| Fetched site icons | `~/.local/share/icons/hicolor/256x256/apps/<name>.png` | kept | removed (only icons named after a quicklink), then empty parent directories |
+| The plugin's enabled state | `~/.config/omarchy/shell.json` | handled by `omarchy plugin remove` | same |
+
+`update-desktop-database` and `gtk-update-icon-cache` are run after changes so
+the caches those tools own are rebuilt; the plugin writes nothing else. It
+never touches `~/.config/hypr/`, adds no autostart entries, systemd units or
+symlinks, and creates no directories of its own beyond the ones above.
+`uninstall` is idempotent, deletes nothing it did not create, and removes a
+directory only when it is empty. Without `--purge`, your quicklinks stay and
+keep working because their `Exec` line calls `omarchy-launch-browser`, not the
+plugin. Run `bin/quicklinks export` first if you want a copy to import later.
 
 ## See also
 

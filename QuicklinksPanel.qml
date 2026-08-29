@@ -26,6 +26,7 @@ Panel {
   property bool privateWindow: false // builder: pass --private to save
   property string editingName: ""   // "" while creating a new link
   property string errorText: ""
+  property string noticeText: ""    // non-error feedback, e.g. where an export landed
   property bool confirmOpen: false
   property string confirmName: ""   // link awaiting delete confirmation
 
@@ -125,6 +126,16 @@ Panel {
     if (!link) return
     Quickshell.execDetached(["wl-copy", link.url])
     root.close()
+  }
+
+  // Writes every quicklink to ~/Downloads/omarchy-quicklinks-<date>.json (or
+  // ~ when there is no Downloads folder) and reports the path.
+  function exportLinks() {
+    if (exportProc.running) return
+    root.errorText = ""
+    root.noticeText = ""
+    exportProc.command = [root.backend, "export", "--force"]
+    exportProc.running = true
   }
 
   function move(delta) {
@@ -238,6 +249,7 @@ Panel {
       root.confirmOpen = false
       root.confirmName = ""
       root.errorText = ""
+      root.noticeText = ""
       linkGate.reset()
       root.reload()
       if (!syncProc.running) syncProc.running = true
@@ -306,6 +318,21 @@ Panel {
   Component.onCompleted: {
     menuInstallProc.running = true
     syncProc.running = true
+  }
+
+  Process {
+    id: exportProc
+    stdout: StdioCollector { waitForEnd: true }
+    stderr: StdioCollector { waitForEnd: true }
+    onExited: function(code, status) {
+      if (code !== 0) {
+        root.errorText = root.stderrOf(exportProc, "quicklinks export failed (exit " + code + ")")
+        return
+      }
+      var path = ""
+      try { path = String(exportProc.stdout.text || "").trim() } catch (e) { path = "" }
+      root.noticeText = path !== "" ? "Exported to " + path : "Exported"
+    }
   }
 
   Process {
@@ -416,6 +443,7 @@ Panel {
           else if (ctrl && event.key === Qt.Key_N) { root.startNew(); event.accepted = true }
           else if (ctrl && event.key === Qt.Key_E) { root.startEdit(); event.accepted = true }
           else if (ctrl && event.key === Qt.Key_C) { root.copySelected(); event.accepted = true }
+          else if (ctrl && event.key === Qt.Key_S) { root.exportLinks(); event.accepted = true }
         }
       }
 
@@ -600,6 +628,16 @@ Panel {
 
       Text {
         width: parent.width
+        visible: root.noticeText !== "" && root.errorText === ""
+        text: root.noticeText
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.WrapAnywhere
+      }
+
+      Text {
+        width: parent.width
         visible: root.errorText !== ""
         text: root.errorText
         color: Color.urgent
@@ -639,6 +677,16 @@ Panel {
           hoverColor: Color.urgent
           fontFamily: root.fontFamily
           onClicked: root.requestRemoveSelected()
+        }
+
+        PanelActionButton {
+          visible: !root.building && root.links.length > 0
+          iconText: "󰈝"
+          tooltipText: "Export quicklinks to a file (Ctrl+S)"
+          enabled: !exportProc.running
+          foreground: root.fg
+          fontFamily: root.fontFamily
+          onClicked: root.exportLinks()
         }
 
         PanelActionButton {

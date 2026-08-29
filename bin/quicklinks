@@ -647,8 +647,211 @@ cmd_menu_uninstall() {
   [[ -f $MENU_EXTENSION ]] || { echo "ok"; return 0; }
   menu_backup "$MENU_EXTENSION"
   menu_strip "$MENU_EXTENSION"
+  menu_remove_if_ours "$MENU_EXTENSION"
   command -v omarchy >/dev/null 2>&1 && omarchy menu refresh >/dev/null 2>&1 || true
   echo "ok"
+}
+
+# menu-install creates the extension file as a bare "{\n}" when it does not
+# exist. If that is all that is left once our rows are gone, the file is ours
+# and goes too, along with the extensions directory when we emptied it.
+menu_remove_if_ours() {
+  local file="$1"
+  [[ -f $file ]] || return 0
+  [[ $(<"$file") == $'{\n}' ]] || return 0
+  rm -f "$file"
+  menu_remove_backup_if_ours "$file"
+  rmdir "$(dirname "$file")" 2>/dev/null || true
+}
+
+# The .bak next to the extension file is ours when it holds our rows (restoring
+# it would bring them back) or when it is the bare skeleton menu-install wrote.
+# Anything else is left alone: another tool may have written it.
+menu_remove_backup_if_ours() {
+  local bak="$1.bak"
+  [[ -f $bak ]] || return 0
+  if grep -q '// >>> omarchy-quicklinks' "$bak" || [[ $(<"$bak") == $'{\n}' ]]; then
+    rm -f "$bak"
+  fi
+}
+
+# ------------------------------------------------------------ export / import
+#
+# A portable snapshot of every quicklink, so a list can be moved to another
+# machine or kept before removing the plugin. `icon` is only recorded when it
+# is a themed icon the user chose (add --icon); the fallback and any icon this
+# plugin fetched from the site are left out, since import fetches them afresh.
+EXPORT_FORMAT="omarchy-quicklinks"
+EXPORT_VERSION=1
+
+default_export_path() {
+  local dir
+  dir=$(xdg-user-dir DOWNLOAD 2>/dev/null) || dir=""
+  [[ -n $dir && -d $dir ]] || dir="$HOME/Downloads"
+  [[ -d $dir ]] || dir="$HOME"
+  printf '%s/omarchy-quicklinks-%s.json\n' "$dir" "$(date +%Y-%m-%d)"
+}
+
+export_json() {
+  local name url icon private safe
+  cmd_list | while IFS=$'\t' read -r name url icon private; do
+    [[ -n $name ]] || continue
+    safe=$(safe_icon_name "$name")
+    [[ $icon == "$FALLBACK_ICON" || $icon == "$safe" ]] && icon=""
+    jq -cn --arg name "$name" --arg url "$url" --arg icon "$icon" --argjson private "$private" \
+      '{name: $name, url: $url, private: $private} + (if $icon == "" then {} else {icon: $icon} end)'
+  done | jq -s --arg format "$EXPORT_FORMAT" --argjson version "$EXPORT_VERSION" \
+    --arg exported "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{format: $format, version: $version, exported: $exported, quicklinks: .}'
+}
+
+# `export [FILE]`. FILE defaults to ~/Downloads/omarchy-quicklinks-<date>.json;
+# `-` writes to stdout. An existing FILE is refused unless --force is given.
+# Prints the path written.
+cmd_export() {
+  local file="" force=0 tmp
+  while (($#)); do
+    case $1 in
+    --force) force=1 ;;
+    -) file="-" ;;
+    -*) die "unknown option: $1" ;;
+    *) file="$1" ;;
+    esac
+    shift
+  done
+  command -v jq >/dev/null 2>&1 || die "export needs jq"
+  if [[ $file == "-" ]]; then
+    export_json
+    return 0
+  fi
+  [[ -n $file ]] || file=$(default_export_path)
+  [[ -d $file ]] && file="$file/$(basename "$(default_export_path)")"
+  [[ -e $file && $force == 0 ]] && die "$file already exists; pass --force to overwrite"
+  mkdir -p "$(dirname "$file")"
+  tmp=$(mktemp "$(dirname "$file")/.quicklinks-export.XXXXXX")
+  if export_json >"$tmp"; then
+    mv -f "$tmp" "$file"
+  else
+    rm -f "$tmp"
+    die "could not write $file"
+  fi
+  printf '%s\n' "$file"
+}
+
+# `import FILE [--replace]`. Reads a file written by export (or a bare JSON
+# array of {name, url, private?, icon?}). Names that already exist are skipped
+# unless --replace, which overwrites them. Prints "imported N skipped M".
+cmd_import() {
+  local file="" replace=0 name url private icon imported=0 skipped=0 target
+  while (($#)); do
+    case $1 in
+    --replace) replace=1 ;;
+    -) file="-" ;;
+    -*) die "unknown option: $1" ;;
+    *) file="$1" ;;
+    esac
+    shift
+  done
+  [[ -n $file ]] || die "usage: quicklinks import <file> [--replace]"
+  command -v jq >/dev/null 2>&1 || die "import needs jq"
+  [[ $file == "-" ]] && file=/dev/stdin
+  [[ -r $file ]] || die "cannot read $file"
+
+  local rows
+  rows=$(jq -r '
+    (if type == "array" then . else (.quicklinks // empty) end)
+    | .[]
+    | select(type == "object" and (.name | type) == "string" and (.url | type) == "string")
+    | [.name, .url, ((.private // false) | tostring), (.icon // "")]
+    | @tsv
+  ' "$file" 2>/dev/null) || die "$file is not a quicklinks export"
+
+  while IFS=$'\t' read -r name url private icon; do
+    [[ -n $name ]] || continue
+    # @tsv escapes tabs and backslashes; undo that.
+    name=$(printf '%b' "$name")
+    url=$(printf '%b' "$url")
+    icon=$(printf '%b' "$icon")
+    name=$(validate_name "$name" 2>/dev/null) || { skipped=$((skipped + 1)); continue; }
+    target=$(desktop_file "$name")
+    if [[ -e $target ]]; then
+      if ((replace)) && is_quicklink "$target"; then
+        cmd_remove "$name" >/dev/null
+      else
+        skipped=$((skipped + 1))
+        continue
+      fi
+    fi
+    local args=("$name" "$url")
+    [[ $private == true ]] && args+=(--private)
+    [[ -n $icon ]] && args+=(--icon "$icon")
+    if cmd_add "${args[@]}" >/dev/null 2>&1; then
+      imported=$((imported + 1))
+    else
+      skipped=$((skipped + 1))
+    fi
+  done <<<"$rows"
+  printf 'imported %d skipped %d\n' "$imported" "$skipped"
+}
+
+# ------------------------------------------------------------------ uninstall
+#
+# Omarchy runs no plugin hooks on `omarchy plugin remove`: it disables the
+# plugin, deletes the folder and rescans. Everything this plugin ever writes
+# outside its own folder is listed here so one command can take it all back:
+#
+#   - its rows in ~/.config/omarchy/extensions/omarchy-menu.jsonc, the "{\n}"
+#     file it created when none existed, and the .bak it wrote next to it
+#   - with --purge: every quicklink entry in ~/.local/share/applications and
+#     the icons it fetched into ~/.local/share/icons/hicolor/256x256/apps
+#
+# Quicklinks are the user's data, so without --purge they stay and keep
+# working (their Exec line calls omarchy-launch-browser, not this plugin).
+# Nothing that this plugin did not create is touched: only entries carrying
+# our marker, only icons named after those entries, and directories are
+# removed only when they are empty.
+cmd_uninstall() {
+  local purge=0 file name safe removed=0
+  while (($#)); do
+    case $1 in
+    --purge) purge=1 ;;
+    --yes | -y) ;;
+    *) die "unknown option: $1" ;;
+    esac
+    shift
+  done
+
+  if ((purge)) && [[ -d $DESKTOP_DIR ]]; then
+    while IFS= read -r -d '' file; do
+      is_quicklink "$file" || continue
+      name=$(basename "${file%.desktop}")
+      safe=$(safe_icon_name "$name")
+      rm -f "$file"
+      [[ -n $safe ]] && rm -f "$ICON_DIR/$safe".*
+      removed=$((removed + 1))
+    done < <(find "$DESKTOP_DIR" -maxdepth 1 -type f -name '*.desktop' -print0 2>/dev/null)
+    if ((removed)); then
+      update_desktop_db
+      update_icon_cache
+    fi
+    # Only the directories we may have created, and only when empty.
+    rmdir -p "$ICON_DIR" 2>/dev/null || true
+    rmdir "$DESKTOP_DIR" 2>/dev/null || true
+  fi
+
+  if [[ -f $MENU_EXTENSION ]]; then
+    menu_prune_legacy_backups "$MENU_EXTENSION"
+    menu_strip "$MENU_EXTENSION"
+    menu_remove_backup_if_ours "$MENU_EXTENSION"
+    menu_remove_if_ours "$MENU_EXTENSION"
+    command -v omarchy >/dev/null 2>&1 && omarchy menu refresh >/dev/null 2>&1 || true
+  fi
+
+  if ((purge)); then
+    echo "removed $removed quicklink(s), menu rows and backups"
+  else
+    echo "removed menu rows and backups; quicklinks kept (use --purge to delete them too)"
+  fi
 }
 
 case "${1:-list}" in
@@ -683,5 +886,17 @@ menu-new) cmd_menu_new ;;
 pick-remove) cmd_pick_remove ;;
 menu-install) cmd_menu_install ;;
 menu-uninstall) cmd_menu_uninstall ;;
-*) die "usage: quicklinks <list|any|add|edit|info|remove|open|sync|fetch-icon|menu-new|pick-remove|menu-install|menu-uninstall> [args]" ;;
+export)
+  shift
+  cmd_export "$@"
+  ;;
+import)
+  shift
+  cmd_import "$@"
+  ;;
+uninstall)
+  shift
+  cmd_uninstall "$@"
+  ;;
+*) die "usage: quicklinks <list|any|add|edit|info|remove|open|sync|fetch-icon|export|import|menu-new|pick-remove|menu-install|menu-uninstall|uninstall> [args]" ;;
 esac

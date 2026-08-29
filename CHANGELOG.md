@@ -3,6 +3,36 @@
 All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 1.3.0 — 2026-08-29
+
+### Added
+
+- `export [FILE|DIR|-] [--force]`: writes every quicklink to a portable JSON
+  file, by default `~/Downloads/omarchy-quicklinks-<date>.json`. The panel gets
+  an export button and `Ctrl+S`, and shows where the file landed. Chosen themed
+  icons are recorded; fetched site icons are not.
+- `import FILE [--replace]`: reads an export (or a bare JSON array of
+  `{name, url, private?, icon?}`) back in, skipping existing names unless
+  `--replace`, validating every row as `add` does, and printing
+  `imported N skipped M`.
+- `uninstall [--purge]`: removes every trace the plugin leaves outside its
+  folder, since Omarchy runs no hooks on `omarchy plugin remove`. Without
+  `--purge` it takes back the menu rows, the extension file if the plugin
+  created it (and the directory if that emptied it) and the plugin's `.bak`
+  files; `--purge` also deletes every quicklink entry and fetched icon, then
+  any parent directories that are left empty. It touches only files carrying
+  the plugin's marker or named after one, and is idempotent.
+- Tests for export, import and uninstall, including a check that nothing of the
+  plugin's remains in the scratch tree after `uninstall --purge`.
+
+### Changed
+
+- `menu-uninstall` now also removes the extension file when the plugin created
+  it (a bare `{}`) and nothing else was ever added to it, along with the `.bak`
+  it wrote and the directory if that left it empty.
+- README documents exactly what is written outside the plugin folder and how
+  `uninstall` handles each item.
+
 ## 1.2.0 — 2026-08-29
 
 ### Changed

@@ -37,6 +37,7 @@ stub setsid 'exec "$@"'
 stub omarchy-menu-input 'exit 1'
 stub omarchy-menu-select 'exit 1'
 stub omarchy-notification-send 'exit 0'
+stub xdg-user-dir 'echo "$HOME/Downloads"'
 export PATH="$T/bin:$PATH"
 
 # ---------------------------------------------------------------- harness
@@ -62,6 +63,7 @@ assert_contains() { [[ $3 == *"$2"* ]] && ok || ko "$1"$'\n  wanted: '"$2"$'\n  
 assert_not_contains() { [[ $3 != *"$2"* ]] && ok || ko "$1"$'\n  did not want: '"$2"$'\n            in: '"$3"; }
 
 L() { "$Q" "$@"; }
+MARKER_LINE="X-Omarchy-Quicklink=true"
 entry() { printf '%s\n' "$OMARCHY_QUICKLINKS_DESKTOP_DIR/$1.desktop"; }
 icon() { printf '%s\n' "$OMARCHY_QUICKLINKS_ICON_DIR/$1.png"; }
 exec_of() { grep '^Exec=' "$(entry "$1")" | cut -d= -f2-; }
@@ -369,11 +371,112 @@ assert_eq "menu-uninstall ok" "ok" "$(L menu-uninstall)"
 assert_ok "menu-uninstall restores original" cmp -s "$T/menu.orig" "$OMARCHY_MENU_EXTENSION"
 assert_eq "still a single .bak after uninstall" "1" "$(ls "$(dirname "$OMARCHY_MENU_EXTENSION")" | grep -c '\.bak')"
 
+# ================================================================ export / import
+echo "# export / import"
+# Icons the plugin fetched itself (named after the entry) are not exported;
+# a themed icon the user picked is.
+sed -i 's/^Icon=.*/Icon=ledger/' "$(entry Ledger)"
+export_json=$(L export -)
+assert_ok "export - is valid JSON" jq -e . <<<"$export_json"
+assert_eq "export format" "omarchy-quicklinks" "$(jq -r .format <<<"$export_json")"
+assert_eq "export version" "1" "$(jq -r .version <<<"$export_json")"
+assert_eq "export count matches list" "$(L list | wc -l)" "$(jq '.quicklinks | length' <<<"$export_json")"
+assert_eq "export raw url survives" 'https://q.example/say"hi"' "$(jq -r '.quicklinks[] | select(.name == "Quote") | .url' <<<"$export_json")"
+assert_eq "export private flag" "true" "$(jq -r '.quicklinks[] | select(.name == "Ledger") | .private' <<<"$export_json")"
+assert_eq "export omits fetched icon" "null" "$(jq -r '.quicklinks[] | select(.name == "Ledger") | .icon' <<<"$export_json")"
+assert_eq "export omits fallback icon" "null" "$(jq -r '.quicklinks[] | select(.name == "Plain") | .icon' <<<"$export_json")"
+assert_eq "export keeps chosen icon" "my-icon" "$(jq -r '.quicklinks[] | select(.name == "Iconed") | .icon' <<<"$export_json")"
+mkdir -p "$HOME/Downloads"
+out=$(L export)
+assert_eq "export default path" "$HOME/Downloads/omarchy-quicklinks-$(date +%Y-%m-%d).json" "$out"
+assert_file "export default file written" "$out"
+assert_fails "export refuses to overwrite" L export
+assert_eq "export --force overwrites" "$out" "$(L export --force)"
+assert_eq "export to given path" "$T/mine.json" "$(L export "$T/mine.json")"
+assert_ok "export file is valid JSON" jq -e . "$T/mine.json"
+assert_eq "export into a directory" "$T/Downloads-like/$(basename "$out")" "$(mkdir -p "$T/Downloads-like"; L export "$T/Downloads-like")"
+assert_eq "export leaves no temp files" "" "$(ls -A "$T/Downloads-like" | grep '^\.')"
+assert_eq "empty export leaves no temp files" "" "$(ls -A "$HOME/Downloads" | grep '^\.')"
+# Import into a fresh tree: everything comes back, private and icon intact.
+mv "$OMARCHY_QUICKLINKS_DESKTOP_DIR" "$T/desktop.pre-import"
+before=$(cd "$T/desktop.pre-import" && grep -l "$MARKER_LINE" *.desktop | wc -l)
+assert_eq "import ok" "imported $before skipped 0" "$(L import "$T/mine.json")"
+assert_eq "import restores list" "$(jq -r '.quicklinks[] | .name' "$T/mine.json" | sort -f)" "$(L list | cut -f1 | sort -f)"
+assert_eq "import restores raw url" 'https://q.example/say"hi"' "$(L info Quote | head -1 | cut -f2)"
+assert_eq "import restores private" $'private\ttrue' "$(L info Ledger | grep -P '^private\t')"
+assert_eq "import restores chosen icon" $'icon\tmy-icon' "$(L info Iconed | grep -P '^icon\t')"
+assert_eq "import refetches dropped icon" $'icon\tweb-browser' "$(L info Ledger | grep -P '^icon\t')"
+assert_eq "import again skips duplicates" "imported 0 skipped $before" "$(L import "$T/mine.json")"
+L edit Quote --url https://changed.example >/dev/null
+assert_eq "import --replace overwrites" "imported $before skipped 0" "$(L import "$T/mine.json" --replace)"
+assert_eq "import --replace restored url" 'https://q.example/say"hi"' "$(L info Quote | head -1 | cut -f2)"
+printf '[{"name":"Bare Array","url":"bare.example"},{"name":"a/b","url":"x"},{"url":"nameless"},"junk"]\n' >"$T/bare.json"
+assert_eq "import bare array, bad rows skipped" "imported 1 skipped 1" "$(L import "$T/bare.json")"
+assert_eq "import normalizes url" "https://bare.example" "$(L info "Bare Array" | head -1 | cut -f2)"
+assert_fails "import missing file" L import "$T/nope.json"
+assert_fails "import non-json" L import "$(entry Plain)"
+assert_fails "import needs a file" L import
+settle
+rm -rf "$OMARCHY_QUICKLINKS_DESKTOP_DIR"
+mv "$T/desktop.pre-import" "$OMARCHY_QUICKLINKS_DESKTOP_DIR"
+
+# ================================================================ uninstall
+echo "# uninstall"
+# Rows present, our .bak present, a legacy .bak.<epoch> lying around.
+L menu-install >/dev/null
+touch "$OMARCHY_MENU_EXTENSION.bak.1700000001"
+cp "$OMARCHY_MENU_EXTENSION" "$OMARCHY_MENU_EXTENSION.bak"
+assert_contains "rows present before uninstall" "omarchy-quicklinks" "$(cat "$OMARCHY_MENU_EXTENSION")"
+assert_ok "uninstall ok" L uninstall
+assert_ok "uninstall restores menu file" cmp -s "$T/menu.orig" "$OMARCHY_MENU_EXTENSION"
+assert_eq "uninstall removes our .bak and legacy backups" "" "$(ls "$(dirname "$OMARCHY_MENU_EXTENSION")" | grep '\.bak')"
+assert_ok "uninstall keeps quicklinks" L any
+assert_file "uninstall keeps entries" "$(entry Plain)"
+assert_ok "uninstall is idempotent" L uninstall
+# A .bak that is not ours (no quicklinks rows in it) is left alone.
+L menu-install >/dev/null
+printf '{\n  "theirs": {"label":"x"}\n}\n' >"$OMARCHY_MENU_EXTENSION.bak"
+L uninstall >/dev/null
+assert_file "uninstall leaves a foreign .bak" "$OMARCHY_MENU_EXTENSION.bak"
+rm -f "$OMARCHY_MENU_EXTENSION.bak"
+# menu-install created the extension file itself: uninstall takes it away again,
+# with the directory.
+rm -rf "$(dirname "$OMARCHY_MENU_EXTENSION")"
+L menu-install >/dev/null
+assert_file "menu-install created the extension file" "$OMARCHY_MENU_EXTENSION"
+L uninstall >/dev/null
+assert_no_file "uninstall removes the file it created" "$OMARCHY_MENU_EXTENSION"
+assert_no_file "uninstall removes the directory it created" "$(dirname "$OMARCHY_MENU_EXTENSION")"
+# menu-uninstall behaves the same for a file it created.
+L menu-install >/dev/null
+L menu-uninstall >/dev/null
+assert_no_file "menu-uninstall removes the file it created" "$OMARCHY_MENU_EXTENSION"
+# --purge: entries and icons go, other apps and their files stay, empty dirs go.
+mkdir -p "$OMARCHY_QUICKLINKS_ICON_DIR"
+printf 'PNG' >"$(icon plain)"; sed -i 's/^Icon=.*/Icon=plain/' "$(entry Plain)"
+printf 'PNG' >"$(icon other)"
+n=$(L list | wc -l)
+assert_eq "uninstall --purge ok" "removed $n quicklink(s), menu rows and backups" "$(L uninstall --purge)"
+assert_fails "purge leaves no quicklinks" L any
+assert_no_file "purge deletes entry" "$(entry Plain)"
+assert_no_file "purge deletes fetched icon" "$(icon plain)"
+assert_file "purge keeps a non-quicklink entry" "$(entry Other)"
+assert_file "purge keeps an icon it did not fetch" "$(icon other)"
+[[ -d $OMARCHY_QUICKLINKS_DESKTOP_DIR ]] && ok || ko "purge keeps non-empty dirs"
+rm -f "$(entry Other)" "$(entry Legacy)" "$(icon other)"
+L uninstall --purge >/dev/null
+assert_no_file "purge removes the emptied icon dir" "$OMARCHY_QUICKLINKS_ICON_DIR"
+assert_no_file "purge removes the emptied desktop dir" "$OMARCHY_QUICKLINKS_DESKTOP_DIR"
+assert_eq "nothing of ours left in scratch" "" "$(grep -rl 'omarchy-quicklinks\|X-Omarchy-Quicklink' "$T" --exclude-dir=bin --exclude-dir=Downloads --exclude-dir=Downloads-like --exclude=mine.json --exclude=bare.json --exclude='menu.*' 2>/dev/null)"
+assert_fails "uninstall unknown option" L uninstall --bogus
+
 # ================================================================ usage
 echo "# usage"
 assert_fails "unknown command" L bogus
 assert_contains "usage mentions edit" "edit" "$(L bogus 2>&1)"
 assert_contains "usage mentions any" "any" "$(L bogus 2>&1)"
+assert_contains "usage mentions export" "export" "$(L bogus 2>&1)"
+assert_contains "usage mentions uninstall" "uninstall" "$(L bogus 2>&1)"
 
 echo
 echo "passed: $pass  failed: $fail"
