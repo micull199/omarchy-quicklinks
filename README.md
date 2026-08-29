@@ -18,6 +18,11 @@ Omarchy 4.x. Everything else it depends on (`gum`, `omarchy-menu-select`,
 
 ## Install
 
+> **Not installable with `omarchy plugin add`.** That command is for Quickshell
+> shell plugins — QML loaded into the `omarchy-shell` process, requiring a
+> `manifest.json`. This is a CLI plugin: shell scripts plus menu entries. Use
+> the `git clone` + `./install.sh` steps below.
+
 ```bash
 git clone <this-repo> ~/src/omarchy-quicklinks
 cd ~/src/omarchy-quicklinks
