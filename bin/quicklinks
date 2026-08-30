@@ -1064,5 +1064,5 @@ menu-uninstall) cmd_menu_uninstall ;;
 export) shift; cmd_export "$@" ;;
 import) shift; cmd_import "$@" ;;
 uninstall) shift; cmd_uninstall "$@" ;;
-*) die "usage: quicklinks <list|any|add <name> <url> [--private] [--icon NAME]|edit <name> [--name NEW] [--url URL] [--private|--no-private]|info|remove|open|fetch-icon|sync|export [file] [--force]|import <file> [--replace]|pick-remove|pick-uninstall|menu-new|menu-install|menu-uninstall|uninstall [--keep-quicklinks] [--remove-plugin]> [args]" ;;
+*) die "usage: quicklinks <list|any|add <name> <url> [--private] [--icon NAME]|edit <name> [--name NEW] [--url URL] [--private|--no-private]|info|remove|open|fetch-icon|sync|export [FILE|DIR|-] [--force]|import FILE [--replace]|pick-remove|pick-uninstall|menu-new|menu-install|menu-uninstall|uninstall [--keep-quicklinks] [--remove-plugin]> [args]" ;;
 esac

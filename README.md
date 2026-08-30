@@ -22,7 +22,7 @@ themselves the first time the plugin loads. If they don't appear, run
 Remove it with `bin/quicklinks uninstall --remove-plugin`; see
 [Uninstall](#uninstall).
 
-## Three ways to reach a quicklink
+## Three ways to open a quicklink
 
 **Omarchy menu / app launcher (`SUPER + SPACE`)** — type the name and press
 Enter. Every quicklink is a row of its own in the menu, under `Quicklinks`: it
