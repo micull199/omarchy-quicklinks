@@ -8,11 +8,11 @@
 #
 # Every piece of state lives inside the plugin folder, under data/:
 #
-#   data/applications/<Name>.desktop   the real desktop entry
-#   data/icons/<slug>.png              the icon fetched for it
+#   data/applications/omarchy-quicklink-<Name>.desktop   the real desktop entry
+#   data/icons/<slug>.png                                the icon fetched for it
 #
 # The only things written elsewhere are SYMLINKS in ~/.local/share/applications
-# (omarchy-quicklink-<Name>.desktop -> data/applications/<Name>.desktop) and a
+# (omarchy-quicklink-<Name>.desktop, same basename, -> the real entry) and a
 # marker-delimited block of rows in the Omarchy menu file, every row guarded by
 # `[ -x <this script> ]`. Omarchy runs no hooks on `omarchy plugin remove`; it
 # just deletes the folder. When that happens the symlinks dangle, so launchers
@@ -22,21 +22,24 @@
 
 set -euo pipefail
 
-SELF="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
-PLUGIN_DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+PLUGIN_DIR="${OMARCHY_QUICKLINKS_PLUGIN_DIR:-$(cd "$(dirname "$SELF")/.." && pwd)}"
 PLUGIN_ID="micull199.quicklinks"
 
 DATA_DIR="${OMARCHY_QUICKLINKS_DATA_DIR:-$PLUGIN_DIR/data}"
-ENTRY_DIR="$DATA_DIR/applications"
-ICON_DIR="${OMARCHY_QUICKLINKS_ICON_DIR:-$DATA_DIR/icons}"
-DESKTOP_DIR="${OMARCHY_QUICKLINKS_DESKTOP_DIR:-$HOME/.local/share/applications}"
-LEGACY_ICON_DIR="${OMARCHY_QUICKLINKS_LEGACY_ICON_DIR:-$HOME/.local/share/icons/hicolor/256x256/apps}"
+ENTRY_DIR="$DATA_DIR/applications"                                              # real .desktop files
+ICON_DIR="${OMARCHY_QUICKLINKS_ICON_DIR:-$DATA_DIR/icons}"                      # fetched icons
+DESKTOP_DIR="${OMARCHY_QUICKLINKS_DESKTOP_DIR:-$HOME/.local/share/applications}" # symlinks to them
+LEGACY_ICON_DIR="${OMARCHY_QUICKLINKS_LEGACY_ICON_DIR:-$HOME/.local/share/icons/hicolor/256x256/apps}" # pre-1.4 icons
+EXPORT_DIR="${OMARCHY_QUICKLINKS_EXPORT_DIR:-}"
 MENU_EXTENSION="${OMARCHY_MENU_EXTENSION:-$HOME/.config/omarchy/extensions/omarchy-menu.jsonc}"
 
-LINK_PREFIX="omarchy-quicklink-"
+DESKTOP_PREFIX="omarchy-quicklink-"
 MARKER="X-Omarchy-Quicklink=true"
 PRIVATE_MARKER="X-Omarchy-Quicklink-Private=true"
 FALLBACK_ICON="web-browser"
+EXPORT_FORMAT="omarchy-quicklinks"
+EXPORT_VERSION=1
 
 die() {
   echo "$*" >&2
@@ -51,10 +54,12 @@ is_private() {
   grep -qxF "$PRIVATE_MARKER" "$1" 2>/dev/null
 }
 
-# The real entry, inside the plugin folder.
-entry_file() { printf '%s\n' "$ENTRY_DIR/$1.desktop"; }
-# The symlink the launcher sees.
-link_file() { printf '%s\n' "$DESKTOP_DIR/$LINK_PREFIX$1.desktop"; }
+# The real entry, inside the plugin folder, and the symlink the launcher sees:
+# same basename, so ownership is unambiguous in both places.
+entry_file() { printf '%s\n' "$ENTRY_DIR/$DESKTOP_PREFIX$1.desktop"; }
+link_file() { printf '%s\n' "$DESKTOP_DIR/$DESKTOP_PREFIX$1.desktop"; }
+# Name of the quicklink a real entry or symlink stands for.
+name_of_file() { local b; b=$(basename "${1%.desktop}"); printf '%s\n' "${b#"$DESKTOP_PREFIX"}"; }
 # Where the icon fetched for a name lands.
 icon_file() { printf '%s\n' "$ICON_DIR/$1.png"; }
 
@@ -222,15 +227,28 @@ DESKTOP
   return 0
 }
 
-# The symlink is what the launcher indexes. Relative targets would break when
-# the plugin folder moves; absolute ones dangle cleanly when it is deleted.
+# The symlink is what the launcher indexes. Absolute target, so it dangles
+# cleanly when the plugin folder is deleted. Returns 0 when it was (re)created,
+# 1 when it was already correct or when a foreign file sits at that path: a
+# regular file without our marker is never replaced, only warned about.
 ensure_link() {
-  local name="$1" target link
-  target=$(entry_file "$name")
+  local name="$1" real link
+  real=$(entry_file "$name")
   link=$(link_file "$name")
-  [[ -L $link && $(readlink "$link") == "$target" ]] && return 0
+  if [[ -L $link ]]; then
+    [[ $(readlink "$link") == "$real" ]] && return 1
+    rm -f "$link"
+  elif [[ -e $link ]]; then
+    if grep -qxF "$MARKER" "$link" 2>/dev/null; then
+      rm -f "$link"   # a pre-1.4 regular file of ours: replaced by the symlink
+    else
+      echo "not replacing $link: it was not written by this plugin" >&2
+      return 1
+    fi
+  fi
   mkdir -p "$DESKTOP_DIR"
-  ln -sfn "$target" "$link"
+  ln -s "$real" "$link"
+  return 0
 }
 
 # Returns 0 when the entry or its link changed, 1 when both were already correct.
@@ -244,8 +262,7 @@ write_entry() {
     chmod +x "$target"
     changed=0
   fi
-  [[ -L $(link_file "$name") && $(readlink "$(link_file "$name")") == "$target" ]] || changed=0
-  ensure_link "$name"
+  ensure_link "$name" && changed=0
   return $changed
 }
 
@@ -332,7 +349,7 @@ cmd_fetch_icon() {
 
 each_entry() { # prints NUL-separated paths of every real quicklink entry
   [[ -d $ENTRY_DIR ]] || return 0
-  find "$ENTRY_DIR" -maxdepth 1 -type f -name '*.desktop' -print0 2>/dev/null
+  find "$ENTRY_DIR" -maxdepth 1 -type f -name "$DESKTOP_PREFIX*.desktop" -print0 2>/dev/null
 }
 
 # Tab-separated "name<TAB>url<TAB>icon<TAB>private", sorted by name.
@@ -342,7 +359,7 @@ cmd_list() {
   while IFS= read -r -d '' file; do
     [[ -r $file ]] || continue
     is_quicklink "$file" || continue
-    name=$(basename "${file%.desktop}")
+    name=$(name_of_file "$file")
     url=$(url_of "$file") || continue
     icon=$(icon_of "$file")
     private=false
@@ -364,7 +381,7 @@ cmd_info() {
 # Exits 0 when at least one quicklink exists. Cheap enough for a menu `when`
 # guard, which runs every time the menu opens.
 cmd_any() {
-  grep -qsxF "$MARKER" "$ENTRY_DIR"/*.desktop 2>/dev/null
+  grep -qsxF "$MARKER" "$ENTRY_DIR/$DESKTOP_PREFIX"*.desktop 2>/dev/null
 }
 
 # A name is free when neither the real entry nor the launcher symlink exists.
@@ -376,8 +393,10 @@ refuse_taken() { # <name>
     is_quicklink "$target" && die "a quicklink named \"$1\" already exists"
     die "\"$1\" already exists and is not a quicklink"
   fi
-  if [[ -e $link || -L $link ]] && [[ $(readlink "$link" 2>/dev/null) != "$target" ]]; then
-    die "$link already exists and is not ours"
+  if [[ -L $link ]]; then
+    [[ $(readlink "$link") == "$target" ]] || die "$link already exists and is not ours"
+  elif [[ -e $link ]]; then
+    is_quicklink "$link" || die "$link already exists and is not ours"
   fi
 }
 
@@ -499,12 +518,23 @@ cmd_open() {
 # `omarchy plugin remove` now takes the data with it. Runs from `sync` on every
 # panel open and does nothing once there is nothing left to migrate.
 migrate_legacy() {
-  local file name safe icon target changed=0
-  [[ -d $DESKTOP_DIR ]] || return 1
+  local file name safe icon target changed=1
+  # 1.4.0 named the real file <Name>.desktop; it is now prefixed like the link.
+  if [[ -d $ENTRY_DIR ]]; then
+    while IFS= read -r -d '' file; do
+      [[ $(basename "$file") == "$DESKTOP_PREFIX"* ]] && continue
+      is_quicklink "$file" || continue
+      name=$(name_of_file "$file")
+      target=$(entry_file "$name")
+      [[ -e $target ]] && { rm -f "$file"; continue; }
+      mv -f "$file" "$target"
+      changed=0
+    done < <(find "$ENTRY_DIR" -maxdepth 1 -type f -name '*.desktop' -print0 2>/dev/null)
+  fi
+  [[ -d $DESKTOP_DIR ]] || return $changed
   while IFS= read -r -d '' file; do
     is_quicklink "$file" || continue
-    name=$(basename "${file%.desktop}")
-    name=${name#"$LINK_PREFIX"}
+    name=$(name_of_file "$file")
     target=$(entry_file "$name")
     if [[ -e $target ]]; then
       # Both exist: the data copy wins, the stray regular file goes.
@@ -524,12 +554,12 @@ migrate_legacy() {
       # themed-icon name that resolves to nothing.
       sed -i "s|^Icon=.*|Icon=$FALLBACK_ICON|" "$target"
     fi
-    ensure_link "$name"
-    changed=1
+    ensure_link "$name" || true
+    changed=0
   done < <(find "$DESKTOP_DIR" -maxdepth 1 -type f -name '*.desktop' -print0 2>/dev/null)
   # Only what we may have created, only when empty.
   rmdir -p "$LEGACY_ICON_DIR" 2>/dev/null || true
-  ((changed))
+  return $changed
 }
 
 # Drop launcher symlinks of ours whose entry is gone (a previous plugin folder
@@ -541,7 +571,7 @@ prune_dangling_links() {
   while IFS= read -r -d '' link; do
     target=$(readlink "$link") || continue
     # Ours by name, or by pointing into a plugin data folder of this id.
-    [[ $(basename "$link") == "$LINK_PREFIX"* || $target == */"$PLUGIN_ID"/data/applications/* || $target == "$ENTRY_DIR"/* ]] || continue
+    [[ $(basename "$link") == "$DESKTOP_PREFIX"* || $target == */"$PLUGIN_ID"/data/applications/* || $target == "$ENTRY_DIR"/* ]] || continue
     [[ -e $link ]] && continue
     rm -f "$link"
     pruned=0
@@ -549,23 +579,30 @@ prune_dangling_links() {
   return $pruned
 }
 
+# Migrate legacy state and prune dangling symlinks. Runs from menu-install
+# (every shell load), sync and uninstall. Returns 0 when something changed.
+self_heal() {
+  local changed=1
+  migrate_legacy && changed=0
+  prune_dangling_links && changed=0
+  return $changed
+}
+
 # Bring every entry up to the current format, make sure every entry has its
-# launcher symlink, migrate legacy state, prune dangling symlinks and
-# regenerate the menu rows. The panel runs this each time it opens; it touches
-# nothing that is already correct.
+# launcher symlink, heal, and regenerate the menu rows. The panel runs this
+# each time it opens; it touches nothing that is already correct.
 cmd_sync() {
   local file name url icon private changed=0
-  migrate_legacy && changed=1
+  self_heal && changed=1
   while IFS= read -r -d '' file; do
     [[ -r $file ]] && is_quicklink "$file" || continue
-    name=$(basename "${file%.desktop}")
+    name=$(name_of_file "$file")
     url=$(url_of "$file") || continue
     icon=$(icon_of "$file")
     private=0
     is_private "$file" && private=1
     write_entry "$name" "$url" "$private" "${icon:-$FALLBACK_ICON}" && changed=1
   done < <(each_entry)
-  prune_dangling_links && changed=1
   ((changed)) && update_desktop_db
   refresh_menu
   echo "ok"
@@ -604,7 +641,7 @@ cmd_pick_remove() {
     exit 0
   fi
 
-  sel=$(omarchy-menu-select "Select quicklink to remove" "${names[@]}" -- --width 520 --maxheight 520) || exit 0
+  sel=$(omarchy-menu-select "Select quicklink to remove" "${names[@]}" -- --width 480 --maxheight 520) || exit 0
   [[ -n $sel ]] || exit 0
 
   answer=$(omarchy-menu-select "Delete quicklink \"$sel\"?" "Delete" "Cancel") || exit 0
@@ -614,17 +651,23 @@ cmd_pick_remove() {
   omarchy-notification-send "Quicklink removed" "$sel" 2>/dev/null || true
 }
 
-# `Remove > Quicklinks plugin` runs this in a floating terminal, the way the
-# stock menu runs omarchy-webapp-remove and friends: confirm, then hand off.
-cmd_menu_uninstall_plugin() {
+# One wording for every uninstall prompt (panel dialog, menu-select).
+uninstall_message() {
   local n
   n=$(cmd_list | wc -l)
-  if command -v gum >/dev/null 2>&1; then
-    gum confirm "Remove the Quicklinks plugin and all $n quicklink(s)?" || exit 0
+  if ((n == 0)); then
+    echo "Uninstall the Quicklinks plugin? Nothing to export."
   else
-    read -r -p "Remove the Quicklinks plugin and all $n quicklink(s)? [y/N] " answer
-    [[ $answer == [yY]* ]] || exit 0
+    echo "Uninstall the Quicklinks plugin and all $n quicklink(s)? Export first if you want them back."
   fi
+}
+
+# `Remove > Quicklinks plugin`: confirm in the menu itself, then hand off.
+cmd_pick_uninstall() {
+  local answer
+  answer=$(omarchy-menu-select "$(uninstall_message)" "Uninstall" "Cancel" -- --width 480) || exit 0
+  [[ $answer == "Uninstall" ]] || exit 0
+  omarchy-notification-send "Quicklinks plugin removed" 2>/dev/null || true
   cmd_uninstall --remove-plugin
 }
 
@@ -692,7 +735,7 @@ menu_block() {
 $(menu_link_rows)
   "install.quicklink": {"icon":"󰉉","label":"Quicklink","description":"A named URL that opens in your default browser","when":"$g","action":"$self menu-new"},
   "remove.quicklink": {"icon":"󰭌","label":"Quicklink","when":"$g && $self any","action":"$self pick-remove"},
-  "remove.quicklinks-plugin": {"icon":"󰌷","label":"Quicklinks plugin","description":"Remove the plugin and every quicklink","when":"$g","action":"omarchy-launch-floating-terminal-with-presentation $self menu-uninstall-plugin"},
+  "remove.quicklinks-plugin": {"icon":"󰩺","label":"Quicklinks plugin","description":"Uninstall the plugin and everything it wrote","when":"$g","action":"$self pick-uninstall"},
   // <<< omarchy-quicklinks
 JSONC
 }
@@ -737,6 +780,7 @@ menu_strip() {
 
 cmd_menu_install() {
   local file="$MENU_EXTENSION" tmp out
+  self_heal && update_desktop_db
   mkdir -p "$(dirname "$file")"
   [[ -f $file ]] || printf '{\n}\n' >"$file"
 
@@ -813,15 +857,19 @@ menu_remove_backup_if_ours() {
 # machine or kept before removing the plugin. `icon` is only recorded when it
 # is a themed icon the user chose (add --icon); the fallback and any icon this
 # plugin fetched from the site are left out, since import fetches them afresh.
-EXPORT_FORMAT="omarchy-quicklinks"
-EXPORT_VERSION=1
+default_export_dir() {
+  local dir="$EXPORT_DIR"
+  if [[ -z $dir ]]; then
+    dir="${XDG_DOWNLOAD_DIR:-}"
+    [[ -z $dir ]] && command -v xdg-user-dir >/dev/null 2>&1 && dir=$(xdg-user-dir DOWNLOAD 2>/dev/null) || true
+    [[ -z $dir ]] && dir="$HOME/Downloads"
+  fi
+  [[ -d $dir ]] || dir="$HOME"
+  printf '%s\n' "$dir"
+}
 
 default_export_path() {
-  local dir
-  dir=$(xdg-user-dir DOWNLOAD 2>/dev/null) || dir=""
-  [[ -n $dir && -d $dir ]] || dir="$HOME/Downloads"
-  [[ -d $dir ]] || dir="$HOME"
-  printf '%s/omarchy-quicklinks-%s.json\n' "$dir" "$(date +%Y-%m-%d)"
+  printf '%s/omarchy-quicklinks-%s.json\n' "$(default_export_dir)" "$(date +%Y-%m-%d)"
 }
 
 export_json() {
@@ -869,60 +917,75 @@ cmd_export() {
   printf '%s\n' "$file"
 }
 
-# `import FILE [--replace]`. Reads a file written by export (or a bare JSON
-# array of {name, url, private?, icon?}). Names that already exist are skipped
-# unless --replace, which overwrites them. Prints "imported N skipped M".
+# String value of one key of row i, or nothing when the row is not an object
+# or the key is not a string/boolean.
+row_field() { # <rows json> <index> <key>
+  jq -r --argjson i "$2" --arg k "$3" '
+    .[$i] | if type == "object" then .[$k] else null end
+    | if type == "string" or type == "boolean" then tostring else empty end
+  ' <<<"$1"
+}
+
+# `import FILE [--replace]`. Reads a file written by export, or a bare JSON
+# array of {name, url, private?, icon?}. Names that already exist are skipped
+# unless --replace, which overwrites them; rows that are not valid quicklinks
+# count as failed. Prints "imported N skipped M failed K" and exits 1 if K > 0.
 cmd_import() {
-  local file="" replace=0 name url private icon imported=0 skipped=0 target
-  while (($#)); do
-    case $1 in
+  command -v jq >/dev/null 2>&1 || die "import needs jq"
+  local file="" replace=0 arg
+  for arg in "$@"; do
+    case "$arg" in
     --replace) replace=1 ;;
-    -) file="-" ;;
-    -*) die "unknown option: $1" ;;
-    *) file="$1" ;;
+    *) [[ -z $file ]] && file="$arg" || die "unexpected argument: $arg" ;;
     esac
-    shift
   done
   [[ -n $file ]] || die "usage: quicklinks import <file> [--replace]"
-  command -v jq >/dev/null 2>&1 || die "import needs jq"
-  [[ $file == "-" ]] && file=/dev/stdin
+  [[ $file == - ]] && file=/dev/stdin
   [[ -r $file ]] || die "cannot read $file"
+  local doc
+  doc=$(cat "$file")
+  jq -e '(type == "array") or (.format == "'"$EXPORT_FORMAT"'" and (.quicklinks | type) == "array")' <<<"$doc" >/dev/null 2>&1 ||
+    die "not an $EXPORT_FORMAT export: $file"
 
-  local rows
-  rows=$(jq -r '
-    (if type == "array" then . else (.quicklinks // empty) end)
-    | .[]
-    | select(type == "object" and (.name | type) == "string" and (.url | type) == "string")
-    | [.name, .url, ((.private // false) | tostring), (.icon // "")]
-    | @tsv
-  ' "$file" 2>/dev/null) || die "$file is not a quicklinks export"
-
-  while IFS=$'\t' read -r name url private icon; do
-    [[ -n $name ]] || continue
-    # @tsv escapes tabs and backslashes; undo that.
-    name=$(printf '%b' "$name")
-    url=$(printf '%b' "$url")
-    icon=$(printf '%b' "$icon")
-    name=$(validate_name "$name" 2>/dev/null) || { skipped=$((skipped + 1)); continue; }
-    target=$(entry_file "$name")
-    if [[ -e $target ]]; then
-      if ((replace)) && is_quicklink "$target"; then
-        cmd_remove "$name" >/dev/null
+  local rows count i name url private icon trimmed imported=0 skipped=0 failed=0 args
+  rows=$(jq -c 'if type == "array" then . else .quicklinks end' <<<"$doc")
+  count=$(jq -r 'length' <<<"$rows")
+  for ((i = 0; i < count; i++)); do
+    name=$(row_field "$rows" "$i" name)
+    url=$(row_field "$rows" "$i" url)
+    private=$(row_field "$rows" "$i" private)
+    icon=$(row_field "$rows" "$i" icon)
+    if [[ -z $name ]]; then
+      echo "quicklink $((i + 1)): no name, skipped" >&2
+      failed=$((failed + 1))
+      continue
+    fi
+    if ! trimmed=$(validate_name "$name" 2>/dev/null); then
+      echo "quicklink $((i + 1)): invalid name \"$name\", skipped" >&2
+      failed=$((failed + 1))
+      continue
+    fi
+    if [[ -e $(entry_file "$trimmed") ]]; then
+      if ((replace)) && is_quicklink "$(entry_file "$trimmed")"; then
+        cmd_remove "$trimmed" >/dev/null
       else
         skipped=$((skipped + 1))
         continue
       fi
     fi
-    local args=("$name" "$url")
+    args=("$trimmed" "$url")
     [[ $private == true ]] && args+=(--private)
     [[ -n $icon ]] && args+=(--icon "$icon")
-    if cmd_add "${args[@]}" >/dev/null 2>&1; then
+    # Subshell so one bad row (die -> exit) does not abort the rest.
+    if (cmd_add "${args[@]}" </dev/null >/dev/null 2>&1); then
       imported=$((imported + 1))
     else
-      skipped=$((skipped + 1))
+      echo "quicklink $((i + 1)) \"$trimmed\": not imported" >&2
+      failed=$((failed + 1))
     fi
-  done <<<"$rows"
-  printf 'imported %d skipped %d\n' "$imported" "$skipped"
+  done
+  echo "imported $imported skipped $skipped failed $failed"
+  ((failed == 0))
 }
 
 # ------------------------------------------------------------------ uninstall
@@ -936,33 +999,30 @@ cmd_import() {
 #     file it created when none existed, and the .bak it wrote next to it
 #   - anything a pre-1.4 version left in the legacy locations (migrated first)
 #
-# and, inside the folder, data/ with every entry and icon — unless
-# `--keep-quicklinks`, which leaves data/ and the symlinks so they stay
-# launchable until the plugin folder itself is removed. `--remove-plugin`
-# finishes by handing off to `omarchy plugin remove`, which removes the plugin
-# folder and its shell.json entry. Nothing that this plugin did not create is
-# touched, and directories are removed only when they are empty.
+# and, inside the folder, data/ with every entry and icon. Nothing that this
+# plugin did not create is touched, and directories are removed only when
+# they are empty.
+#
+# uninstall [--keep-quicklinks] [--remove-plugin]
+#   --keep-quicklinks  leave data/ (and the symlinks into it) in place, e.g. to
+#                      reinstall later; menu rows still go
+#   --remove-plugin    finish with `omarchy plugin remove micull199.quicklinks --yes`
 cmd_uninstall() {
-  local keep=0 remove_plugin=0 file name removed=0
-  while (($#)); do
-    case $1 in
+  local keep=0 remove_plugin=0 arg file
+  for arg in "$@"; do
+    case "$arg" in
     --keep-quicklinks) keep=1 ;;
     --remove-plugin) remove_plugin=1 ;;
-    --yes | -y) ;;
-    *) die "unknown option: $1" ;;
+    *) die "unknown uninstall option: $arg" ;;
     esac
-    shift
   done
 
-  migrate_legacy || true
-  prune_dangling_links || true
+  self_heal || true
 
-  if ((!keep)); then
+  if ! ((keep)); then
     while IFS= read -r -d '' file; do
       is_quicklink "$file" || continue
-      name=$(basename "${file%.desktop}")
-      rm -f "$(link_file "$name")"
-      removed=$((removed + 1))
+      rm -f "$(link_file "$(name_of_file "$file")")"
     done < <(each_entry)
     rm -rf "$DATA_DIR"
     rmdir "$DESKTOP_DIR" 2>/dev/null || true
@@ -977,14 +1037,11 @@ cmd_uninstall() {
     command -v omarchy >/dev/null 2>&1 && omarchy menu refresh >/dev/null 2>&1 || true
   fi
 
-  if ((keep)); then
-    echo "removed menu rows and backups; quicklinks kept"
-  else
-    echo "removed $removed quicklink(s), menu rows and backups"
-  fi
-
+  echo "ok"
   if ((remove_plugin)); then
-    command -v omarchy >/dev/null 2>&1 || die "omarchy is not on PATH; remove the plugin folder by hand"
+    command -v omarchy >/dev/null 2>&1 || die "omarchy not found; remove the plugin folder yourself"
+    # exec: bash reads scripts incrementally, so nothing may run after the
+    # plugin folder (and this file) is deleted.
     exec omarchy plugin remove "$PLUGIN_ID" --yes
   fi
 }
@@ -992,47 +1049,20 @@ cmd_uninstall() {
 case "${1:-list}" in
 list) cmd_list ;;
 any) cmd_any ;;
-add)
-  shift
-  cmd_add "$@"
-  ;;
-edit)
-  shift
-  cmd_edit "$@"
-  ;;
-info)
-  shift
-  cmd_info "$@"
-  ;;
-remove)
-  shift
-  cmd_remove "$@"
-  ;;
-open)
-  shift
-  cmd_open "$@"
-  ;;
-fetch-icon)
-  shift
-  cmd_fetch_icon "$@"
-  ;;
+add) shift; cmd_add "$@" ;;
+edit) shift; cmd_edit "$@" ;;
+info) shift; cmd_info "$@" ;;
+remove) shift; cmd_remove "$@" ;;
+open) shift; cmd_open "$@" ;;
+fetch-icon) shift; cmd_fetch_icon "$@" ;;
 sync) cmd_sync ;;
-menu-new) cmd_menu_new ;;
 pick-remove) cmd_pick_remove ;;
-menu-uninstall-plugin) cmd_menu_uninstall_plugin ;;
+pick-uninstall) cmd_pick_uninstall ;;
+menu-new) cmd_menu_new ;;
 menu-install) cmd_menu_install ;;
 menu-uninstall) cmd_menu_uninstall ;;
-export)
-  shift
-  cmd_export "$@"
-  ;;
-import)
-  shift
-  cmd_import "$@"
-  ;;
-uninstall)
-  shift
-  cmd_uninstall "$@"
-  ;;
-*) die "usage: quicklinks <list|any|add|edit|info|remove|open|sync|fetch-icon|export|import|menu-new|pick-remove|menu-install|menu-uninstall|uninstall> [args]" ;;
+export) shift; cmd_export "$@" ;;
+import) shift; cmd_import "$@" ;;
+uninstall) shift; cmd_uninstall "$@" ;;
+*) die "usage: quicklinks <list|any|add <name> <url> [--private] [--icon NAME]|edit <name> [--name NEW] [--url URL] [--private|--no-private]|info|remove|open|fetch-icon|sync|export [file] [--force]|import <file> [--replace]|pick-remove|pick-uninstall|menu-new|menu-install|menu-uninstall|uninstall [--keep-quicklinks] [--remove-plugin]> [args]" ;;
 esac

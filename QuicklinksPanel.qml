@@ -13,8 +13,10 @@ Panel {
   id: root
   moduleName: "micull199.quicklinks"
   ipcTarget: "micull199.quicklinks"
-  // manageIpc: false so this panel can own the single IpcHandler the target
-  // permits, and add newLink() for the menu's "Install > Quicklink" row.
+  // manageIpc: false so this panel owns the single IpcHandler the target
+  // permits (open/close/toggle for the menu's "Manage quicklinks" row and
+  // keybindings). The menu's "Install > Quicklink" row uses the backend's own
+  // prompts (`menu-new`) and does not go through IPC.
   manageIpc: false
 
   readonly property string backend: String(Qt.resolvedUrl("bin/quicklinks")).replace(/^file:\/\//, "")
@@ -157,8 +159,8 @@ Panel {
     Qt.callLater(function() { confirmKeys.forceActiveFocus() })
   }
 
-  // Remove the plugin and every quicklink: `uninstall --remove-plugin` takes
-  // the symlinks and menu rows away, then hands off to `omarchy plugin
+  // Uninstall the plugin and every quicklink: `uninstall --remove-plugin`
+  // takes the symlinks and menu rows away, then hands off to `omarchy plugin
   // remove`, which deletes this folder and unloads the widget. Detached, so
   // the panel going away does not stop it.
   function requestUninstall() {
@@ -286,11 +288,6 @@ Panel {
     function show(): void { root.open() }
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
-    // Opens the panel straight into the builder.
-    function newLink(): void {
-      root.open()
-      Qt.callLater(function() { root.startNew() })
-    }
   }
 
   // Filters hover churn: a delegate sliding under a resting pointer must not
@@ -309,10 +306,12 @@ Panel {
     }
   }
 
-  // Adds the Omarchy menu rows (Quicklinks, Install > Quicklink,
-  // Remove > Quicklink). The menu has no plugin API, so this is the only way
-  // they can appear automatically. menu-install does nothing when the rows
-  // are already correct. `quicklinks menu-uninstall` removes them again.
+  // Adds the Omarchy menu rows: the Quicklinks submenu (Manage quicklinks and
+  // one row per link), Install > Quicklink, Remove > Quicklink and
+  // Remove > Quicklinks plugin. The menu has no plugin API, so this is the
+  // only way they can appear automatically. menu-install also heals (migrates
+  // old state, prunes dangling symlinks) and does nothing when everything is
+  // already correct. `quicklinks menu-uninstall` removes the rows again.
   Process {
     id: menuInstallProc
     command: [root.backend, "menu-install"]
@@ -427,9 +426,11 @@ Panel {
         anchors.fill: parent
         opened: root.confirmOpen
         message: root.confirmKind === "uninstall"
-          ? "Remove the Quicklinks plugin and all " + root.links.length + " quicklink(s)? Export first if you want them back."
+          ? (root.links.length === 0
+             ? "Uninstall the Quicklinks plugin? Nothing to export."
+             : "Uninstall the Quicklinks plugin and all " + root.links.length + " quicklink(s)? Export first if you want them back.")
           : "Delete quicklink \"" + root.confirmName + "\"?"
-        confirmText: root.confirmKind === "uninstall" ? "Remove plugin" : "Delete"
+        confirmText: root.confirmKind === "uninstall" ? "Uninstall" : "Delete"
         background: Color.popups.background
         foreground: root.fg
         fontFamily: root.fontFamily
@@ -706,7 +707,7 @@ Panel {
         PanelActionButton {
           visible: !root.building && root.links.length > 0
           iconText: "󰈝"
-          tooltipText: "Export quicklinks to a file (Ctrl+S)"
+          tooltipText: "Export all quicklinks to a file (Ctrl+S)"
           enabled: !exportProc.running
           foreground: root.fg
           fontFamily: root.fontFamily
@@ -716,7 +717,7 @@ Panel {
         PanelActionButton {
           visible: !root.building
           iconText: "󰩺"
-          tooltipText: "Remove the Quicklinks plugin and every quicklink"
+          tooltipText: "Uninstall the Quicklinks plugin (removes every quicklink)"
           foreground: root.fg
           hoverColor: Color.urgent
           fontFamily: root.fontFamily

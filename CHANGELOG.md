@@ -3,6 +3,48 @@
 All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 1.5.0 — 2026-08-30
+
+### Changed
+
+- The real desktop file is now `data/applications/omarchy-quicklink-<Name>.desktop`,
+  the same basename as its launcher symlink; `sync` renames 1.4.0's unprefixed
+  files.
+- `Remove > Quicklinks plugin` confirms inside the menu (`pick-uninstall`,
+  `omarchy-menu-select`) instead of opening a floating terminal with `gum`;
+  `menu-uninstall-plugin` is gone. The row now reads "Uninstall the plugin and
+  everything it wrote" with the 󰩺 glyph.
+- One uninstall wording everywhere (panel dialog, menu): "Uninstall the
+  Quicklinks plugin and all N quicklink(s)? Export first if you want them
+  back." — "Uninstall the Quicklinks plugin? Nothing to export." when there
+  are none. Confirm button "Uninstall"; tooltip "Uninstall the Quicklinks
+  plugin (removes every quicklink)".
+- `import` prints `imported N skipped M failed K` and exits 1 when K > 0.
+  Rows that are not valid quicklinks count as failed, existing names as
+  skipped. An object document must carry `"format": "omarchy-quicklinks"`;
+  a bare array is still accepted.
+- `uninstall` prints `ok` only, rejects any option other than
+  `--keep-quicklinks` and `--remove-plugin` (`--yes` is gone), and reports
+  "omarchy not found; remove the plugin folder yourself" when it cannot hand
+  off.
+- Export default folder honours `XDG_DOWNLOAD_DIR`, then `xdg-user-dir
+  DOWNLOAD`, then `~/Downloads`, then `~`; `OMARCHY_QUICKLINKS_EXPORT_DIR`
+  overrides it. Export tooltip: "Export all quicklinks to a file (Ctrl+S)".
+- `OMARCHY_QUICKLINKS_PLUGIN_DIR` override added; `self_heal` (migration and
+  dangling-symlink pruning) runs from `menu-install`, `sync` and `uninstall`.
+- `omarchy-menu-select` pickers use `--width 480`.
+- Usage text lists every subcommand with its flags inline.
+- README reorganised: command list and environment overrides live under
+  Development; the menu-file section notes the file is shared with Layouts.
+
+### Fixed
+
+- A regular desktop file that is not ours sitting at a symlink's path is no
+  longer replaced; the plugin warns on stderr and leaves it, in every path
+  (add, edit, sync, migration).
+- Removed the dead `newLink()` IPC method and its comment from the panel.
+- Tests: a stray `$LAYOUTS` in an assertion now reads `$Q`.
+
 ## 1.4.0 — 2026-08-30
 
 Removing the plugin with a bare `omarchy plugin remove` used to leave the
